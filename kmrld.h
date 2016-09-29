@@ -2,7 +2,9 @@
 /* Copyright (C) 2012-2016 RIKEN AICS */
 /* Copyright (C) 1996-2007, 2009, 2010 Free Software Foundation, Inc. */
 
-/** \file kmrld.h Interface defined in "kmrld.c". */
+/** \file kmrld.h Interface to the routines defined in "kmrld.c". */
+
+/* Severity for the error printer.  Smaller numbers are more sever. */
 
 enum {
     DIE = 0,
@@ -12,9 +14,10 @@ enum {
 };
 
 extern void kmr_ld_usoexec(char **argv, char **oldargv, long flags,
-			   void (*errfn)(int, char *, ...),
 			   char *heapbottom);
 extern long kmr_ld_get_symbol_size(char *symbol);
+extern void kmr_ld_set_error_printer(int level,
+				     void (*printfn)(int, char *, ...));
 extern void (*kmr_ld_err)(int, char *, ...);
 
 /*

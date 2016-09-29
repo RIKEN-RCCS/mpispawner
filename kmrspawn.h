@@ -24,7 +24,7 @@ enum kmr_spawn_req {
 
 /* RPC Message.  KMR_SPAWN_NEXT (worker-to-master) is a message to
    notify a finish of a work-item and to ask for a next one.  It is
-   initially sent as to notify a worker is ready.  */
+   also initially sent as to notify a worker is ready.  */
 
 struct kmr_spawn_next {
     enum kmr_spawn_req req;
@@ -34,10 +34,12 @@ struct kmr_spawn_next {
 };
 
 /* RPC Message to Send a Work.  KMR_SPAWN_WORK (master-to-worker) is a
-   message to start a work-item.  Note the message structure is
-   truncated by the size of the argument string.  SUBWORLD is an index
-   to a SUBWORLDS vector previously registered.  NPROCS is the number
-   of ranks used.  COLOR is a check code of a SUBWORLD index.  COLOR
+   message to start a work-item.  Note that the structure of a message
+   is truncated by the size of the argument string.  The length set in
+   MESSAGE_SIZE includes the whole structure.  SUBWORLD is an index to
+   the vector of subworlds previously registered.  NPROCS is the
+   number of ranks used.  It is just used to check the size of a
+   communicator.  COLOR is a check code of a SUBWORLD index.  A color
    is compared to a value previously registered. */
 
 struct kmr_spawn_work {
@@ -109,7 +111,7 @@ struct kmr_spawn_hooks {
     struct {
 	char **initial_argv;
 	long options_flag;
-	void (*options_errfn)(int, char *, ...);
+	//void (*options_errfn)(int, char *, ...);
 	char *options_heap_bottom;
     } d;
 
@@ -132,6 +134,9 @@ struct kmr_spawn_hooks {
 	int (*PMPI_Query_thread)(int *provided);
 
 	/* (Used in this hook). */
+
+	void *mpi_byte; /*ompi_mpi_byte*/
+	void *mpi_comm_null; /*ompi_mpi_comm_null*/
 
 	int (*PMPI_Comm_get_parent)(MPI_Comm *parent);
 	int (*PMPI_Comm_get_name)(MPI_Comm comm, char *name, int *len);
@@ -157,11 +162,9 @@ struct kmr_spawn_hooks {
     } h;
 };
 
-extern struct kmr_spawn_hooks *kmr_spawn_hooks;
-
 /* API of Wokers. */
 
-extern int kmr_spawn_hook_mpi(struct kmr_spawn_hooks *hooks);
+extern int kmr_spawn_hookup(struct kmr_spawn_hooks *hooks);
 extern int kmr_spawn_setup(struct kmr_spawn_hooks *hooks,
 			   MPI_Comm basecomm, int masterrank,
 			   int (*execfn)(struct kmr_spawn_hooks *,
@@ -171,7 +174,7 @@ extern int kmr_spawn_setup(struct kmr_spawn_hooks *hooks,
 			   size_t argssize);
 extern void kmr_spawn_service_rpc(struct kmr_spawn_hooks *hooks, int status);
 
-/* Callers of Unhooked Routines. */
+/* Calling Unhooked Routines. */
 
 extern void kmr_spawn_true_exit(int status);
 extern int kmr_spawn_true_execve(const char *file, char *const argv[],
@@ -179,7 +182,7 @@ extern int kmr_spawn_true_execve(const char *file, char *const argv[],
 extern int kmr_spawn_true_mpi_finalize(void);
 extern int kmr_spawn_true_mpi_abort(MPI_Comm comm, int code);
 
-/* Callers of MPI Routines. */
+/* Calling MPI Routines. */
 
 extern int kmr_spawn_mpi_comm_size(MPI_Comm comm, int *size);
 extern int kmr_spawn_mpi_comm_rank(MPI_Comm comm, int *rank);

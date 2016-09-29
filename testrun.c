@@ -67,15 +67,15 @@ main(int argc, char **argv, char **envp)
     fprintf(stderr, "REFER STDERR\n"); fflush(0);
 #endif
 
-    if (1) {
-    char pmap[80];
-    snprintf(pmap, sizeof(pmap), "pmap -x %d", getpid());
-    printf(">pmap\n"); fflush(0);
-    int cc0 = system(pmap);
-    if (cc0 != 0) {
-	perror("system(pmap)"); fflush(0);
-    }
-    printf("<pmap\n"); fflush(0);
+    if (0) {
+	char pmap[80];
+	snprintf(pmap, sizeof(pmap), "pmap -x %d", getpid());
+	printf(">pmap\n"); fflush(0);
+	int cc0 = system(pmap);
+	if (cc0 != 0) {
+	    perror("system(pmap)"); fflush(0);
+	}
+	printf("<pmap\n"); fflush(0);
     }
 
 #if (TEST_RUN_WITH_THREADS > 0)
@@ -96,24 +96,35 @@ main(int argc, char **argv, char **envp)
 
 #endif /*TEST_RUN_WITH_THREADS*/
 
-    /* Load libkmrld.so. */
+    /* Load libkmrspawn.so. */
 
-    void *m = dlopen("libkmrld.so", (RTLD_NOW|RTLD_GLOBAL));
+    void *m = dlopen("libkmrspawn.so", (RTLD_NOW|RTLD_GLOBAL));
     if (m == 0) {
-	printf("dlopen(libkmrld.so): %s\n", dlerror());
+	printf("dlopen(libkmrspawn.so): %s\n", dlerror());
 	abort();
     }
-    typedef void (*usoexecfn_t)(char **, char **, long, 
-				void (*)(int, char *, ...), char *);
+
+    typedef void (*usoexecfn_t)(char **, char **, long, char *);
     usoexecfn_t usoexec = (usoexecfn_t)dlsym(m, "kmr_ld_usoexec");
     if (usoexec == 0) {
-	printf("dlsym(libkmrld.so, kmr_ld_usoexec): %s\n", dlerror());
+	printf("dlsym(kmr_ld_usoexec): %s\n", dlerror());
 	abort();
     }
 
-    char **nargv = &argv[1];
+    typedef long (*getsize_t)(char *);
+    getsize_t getsize = (getsize_t)dlsym(m, "kmr_ld_get_symbol_size");
+    if (getsize == 0) {
+	printf("dlsym(kmr_ld_get_symbol_size): %s\n", dlerror());
+	abort();
+    }
+    long sz = (*getsize)("printf");
+    printf("size of symbol printf=%ld\n", sz);
+    fflush(0);
 
-    (*usoexec)(nargv, argv,options, 0x113, 0, hlow);
+    char **oldargv = argv;
+    char **newargv = &argv[1];
+
+    (*usoexec)(newargv, oldargv, 0x110, hlow);
 
     /* Never returns. */
 

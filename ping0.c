@@ -33,30 +33,24 @@ main(int argc, char **argv)
 	}
     }
 
-    printf("loading libkmrld.so...\n"); fflush(0);
-    void *m = dlopen("libkmrld.so", (RTLD_NOW|RTLD_GLOBAL));
+    printf("loading libkmrspawn.so...\n"); fflush(0);
+    void *m = dlopen("libkmrspawn.so", (RTLD_NOW|RTLD_GLOBAL));
     if (m == 0) {
-	fprintf(stderr, "dlopen(libkmrld.so): %s\n", dlerror());
+	fprintf(stderr, "dlopen(libkmrspawn.so): %s\n", dlerror());
 	abort();
     }
-    void (*usoexec)(char **, char **, intptr_t *) 
-	= (void (*)(char **, char **, intptr_t *))dlsym(m, "kmr_ld_usoexec");
+    typedef void (*usoexecfn_t)(char **, char **, long, char *);
+    usoexecfn_t usoexec = (usoexecfn_t)dlsym(m, "kmr_ld_usoexec");
     if (usoexec == 0) {
-	fprintf(stderr, "dlsym(libkmrld.so, kmr_ld_usoexec): %s\n", dlerror());
+	fprintf(stderr, "dlsym(kmr_ld_usoexec): %s\n", dlerror());
 	abort();
     }
 
     if (0) {
-	char **nargv = &argv[1];
-
-	intptr_t options[3] = {
-	    0x03,
-	    0,
-	    (intptr_t)0
-	};
-
+	char **oldargv = argv;
+	char **newargv = &argv[1];
 	printf("USOEXEC...\n"); fflush(0);
-	(*usoexec)(argv, nargv, options);
+	(*usoexec)(newargv, oldargv, 0x110, 0);
 	printf("USOEXEC RETURNS\n"); fflush(0);
 	abort();
     }
@@ -140,15 +134,9 @@ main(int argc, char **argv)
     MPI_Barrier(MPI_COMM_WORLD);
 
     if (rank == 0) {
-	char **nargv = &argv[1];
-
-	intptr_t options[3] = {
-	    0x113,
-	    0,
-	    (intptr_t)0
-	};
-
-	(*usoexec)(argv, nargv, options);
+	char **oldargv = argv;
+	char **newargv = &argv[1];
+	(*usoexec)(newargv, oldargv, 0x110, 0, 0);
 	printf("USOEXEC RETURNS\n"); fflush(0);
 	abort();
     }

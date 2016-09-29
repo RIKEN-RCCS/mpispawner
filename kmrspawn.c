@@ -1,12 +1,13 @@
 /* kmrspawn.c (2016-07-09) -*-Coding: us-ascii;-*- */
 /* Copyright (C) 2012-2016 RIKEN AICS */
 
-/** \file kmrspawn.c Static-Spawning Interface.  It is the worker-side
-    of the master-worker protocol.  See the source code of the KMR
-    map-reduce library for the use of this library
-    (https://github.com/pf-aics-riken/kmr).  The worker-side is here
-    and the master-side is in "kmrwfmap.c" in KMR.  Note that this
-    part is included in KMR to implement a dummy spawning library. */
+/** \file kmrspawn.c Static-Spawning Interface.  This is a part of the
+    spawning library (https://github.com/pf-aics-riken/mpispawner).
+    See also the source code of the KMR map-reduce library for the use
+    of spawning (https://github.com/pf-aics-riken/kmr).  It is the
+    worker-side of the master-worker protocol, and the master-side is
+    in "kmrwfmap.c" in KMR.  Note that this code is also included in
+    KMR to implement a dummy spawning. */
 
 #include <mpi.h>
 #include <stdio.h>
@@ -43,7 +44,16 @@
 #endif
 
 #if KMR_LIBKMR
+#define kmr_mpi_byte MPI_BYTE
+#define kmr_mpi_comm_null MPI_COMM_NULL
+#else
+#define kmr_mpi_byte (hooks->h.mpi_byte)
+#define kmr_mpi_comm_null (hooks->h.mpi_comm_null)
+#endif
+
+#if KMR_LIBKMR
 #define kmr_spawn_true_exit exit
+#define kmr_spawn_true_mpi_finalize MPI_Finalize
 #define kmr_spawn_mpi_comm_size MPI_Comm_size
 #define kmr_spawn_mpi_comm_rank MPI_Comm_rank
 #define kmr_spawn_mpi_send MPI_Send
@@ -53,18 +63,20 @@
 #define kmr_spawn_mpi_comm_dup MPI_Comm_dup
 #define kmr_spawn_mpi_comm_free MPI_Comm_free
 #define kmr_spawn_mpi_comm_set_name MPI_Comm_set_name
-#define kmr_spawn_mpi_finalize MPI_Finalize
 #else
 /*NOTHING*/
 #endif
 
-struct kmr_spawn_hooks *kmr_spawn_hooks = 0;
-
 static int kmr_spawn_exec_command(struct kmr_spawn_hooks *hooks,
 				 int argc, char **argv);
 
-/* Records subworld communicators which will be used as a world of
-   spawning.  Set the MR field before calls. */
+/* Records the parameters to spawning.  It registers an exec-function,
+   subworld communicators, and their colors.  EXECFN is called at
+   starting a work-item.  A communicator in SUBWORLDS will be selected
+   as a world of spawning.  A color in COLORS is passed to check the
+   correspondence of the subworld at spawning.  ARGSSIZE is the limit
+   of the argv string size in RPC messages.  It needs to set the MR
+   field in the HOOKS before calling this.  */
 
 int
 kmr_spawn_setup(struct kmr_spawn_hooks *hooks,
@@ -117,7 +129,7 @@ kmr_spawn_setup(struct kmr_spawn_hooks *hooks,
 	    hooks->s.subworlds[i].comm = subworlds[i];
 	    hooks->s.subworlds[i].color = colors[i];
 	} else {
-	    hooks->s.subworlds[i].comm = MPI_COMM_NULL;
+	    hooks->s.subworlds[i].comm = kmr_mpi_comm_null;
 	    hooks->s.subworlds[i].color = 0;
 	}
     }
@@ -136,8 +148,8 @@ kmr_spawn_setup(struct kmr_spawn_hooks *hooks,
     hooks->s.rpc_buffer = kmr_malloc(msz);
     hooks->s.rpc_size = msz;
 
-    hooks->s.spawn_world = MPI_COMM_NULL;
-    hooks->s.spawn_parent = MPI_COMM_NULL;
+    hooks->s.spawn_world = kmr_mpi_comm_null;
+    hooks->s.spawn_parent = kmr_mpi_comm_null;
     hooks->s.running_work = 0;
     hooks->s.mpi_initialized = 0;
     hooks->s.abort_when_mpi_abort = 0;
@@ -182,7 +194,7 @@ kmr_spawn_service_rpc(struct kmr_spawn_hooks *hooks, int status)
 	    mbuf->initial_message = (hooks->s.service_count == 0);
 	    mbuf->status = status;
 	    int msz = (int)sizeof(struct kmr_spawn_next);
-	    cc = kmr_spawn_mpi_send(mbuf, msz, MPI_BYTE, master,
+	    cc = kmr_spawn_mpi_send(mbuf, msz, kmr_mpi_byte, master,
 				    KMR_SPAWN_RPC_TAG, basecomm);
 	    assert(cc == MPI_SUCCESS);
 	}
@@ -191,10 +203,10 @@ kmr_spawn_service_rpc(struct kmr_spawn_hooks *hooks, int status)
 	int msz = (int)hooks->s.rpc_size;
 	MPI_Status st;
 	int len;
-	cc = kmr_spawn_mpi_recv(mbuf, msz, MPI_BYTE, master,
+	cc = kmr_spawn_mpi_recv(mbuf, msz, kmr_mpi_byte, master,
 				KMR_SPAWN_RPC_TAG, basecomm, &st);
 	assert(cc == MPI_SUCCESS);
-	cc = kmr_spawn_mpi_get_count(&st, MPI_BYTE, &len);
+	cc = kmr_spawn_mpi_get_count(&st, kmr_mpi_byte, &len);
 	assert(cc == MPI_SUCCESS);
 	size_t msglen = (size_t)len;
 
@@ -282,7 +294,7 @@ kmr_spawn_start_work(struct kmr_spawn_hooks *hooks,
     size_t asz = (msglen - offsetof(struct kmr_spawn_work, args));
 
     if (!(0 <= w->subworld && w->subworld < KMR_SPAWN_SUBWORLDS)
-	|| hooks->s.subworlds[w->subworld].comm == MPI_COMM_NULL) {
+	|| hooks->s.subworlds[w->subworld].comm == kmr_mpi_comm_null) {
 	char ee[80];
 	snprintf(ee, sizeof(ee),
 		 ("Bad subworld index for spawning (index=%d).\n"),
@@ -347,12 +359,9 @@ kmr_spawn_start_work(struct kmr_spawn_hooks *hooks,
 	fflush(0);
     }
 
-    if (hooks->s.exec_fn != 0) {
-	(*hooks->s.exec_fn)(hooks, argc, argv);
-    } else {
-	kmr_spawn_exec_command(hooks, argc, argv);
-	/* (NEVER RETURNS). */
-    }
+    assert(hooks->s.exec_fn != 0);
+    (*hooks->s.exec_fn)(hooks, argc, argv);
+    /* (NEVER RETURNS WHEN EXECED). */
 
     hooks->s.running_work = 0;
     hooks->s.mpi_initialized = 0;
@@ -361,15 +370,13 @@ kmr_spawn_start_work(struct kmr_spawn_hooks *hooks,
 }
 
 static int
-kmr_spawn_exec_command(struct kmr_spawn_hooks *hooks,
-		       int argc, char **argv)
+kmr_spawn_exec_command(struct kmr_spawn_hooks *hooks, int argc, char **argv)
 {
 #if KMR_LIBKMR
     return MPI_SUCCESS;
 #else
     kmr_ld_usoexec(argv, hooks->d.initial_argv,
 		   hooks->d.options_flag,
-		   hooks->d.options_errfn,
 		   hooks->d.options_heap_bottom);
     return MPI_SUCCESS;
 #endif
@@ -402,7 +409,7 @@ kmr_spawn_join_to_master(struct kmr_spawn_hooks *hooks,
 			 struct kmr_spawn_work *w, size_t msglen)
 {
     assert(w->subworld < KMR_SPAWN_SUBWORLDS);
-    assert(hooks->s.subworlds[w->subworld].comm != MPI_COMM_NULL);
+    assert(hooks->s.subworlds[w->subworld].comm != kmr_mpi_comm_null);
     MPI_Comm basecomm = hooks->s.base_comm;
     //const int master = hooks->s.master_rank;
     MPI_Comm subworld = hooks->s.subworlds[w->subworld].comm;
@@ -432,8 +439,8 @@ kmr_spawn_join_to_master(struct kmr_spawn_hooks *hooks,
 	abort();
     }
 
-    assert(hooks->s.spawn_world == MPI_COMM_NULL);
-    assert(hooks->s.spawn_parent == MPI_COMM_NULL);
+    assert(hooks->s.spawn_world == kmr_mpi_comm_null);
+    assert(hooks->s.spawn_parent == kmr_mpi_comm_null);
 
     cc = kmr_spawn_mpi_comm_dup(subworld, &hooks->s.spawn_world);
     assert(cc == MPI_SUCCESS);
@@ -468,11 +475,11 @@ kmr_spawn_clean_worker_state(struct kmr_spawn_hooks *hooks)
 		 (size_t)hooks->s.running_work->message_size);
 	hooks->s.running_work = 0;
     }
-    if (hooks->s.spawn_world != MPI_COMM_NULL) {
+    if (hooks->s.spawn_world != kmr_mpi_comm_null) {
 	cc = kmr_spawn_mpi_comm_free(&hooks->s.spawn_world);
 	assert(cc == MPI_SUCCESS);
     }
-    if (hooks->s.spawn_parent != MPI_COMM_NULL) {
+    if (hooks->s.spawn_parent != kmr_mpi_comm_null) {
 	cc = kmr_spawn_mpi_comm_free(&hooks->s.spawn_parent);
 	assert(cc == MPI_SUCCESS);
     }

@@ -1,4 +1,5 @@
-# mpispawner
-MPI spawner in static processes
+# MPI Spawner in Static Processes
 
-(This package is a part of KMR [https://github.com/pf-aics-riken/kmr].  This part is under the GNU licence, and is separated from the main part.)
+__This package is a part of KMR
+[https://github.com/pf-aics-riken/kmr].  This part is under GPL, and
+is separated from the main part.__

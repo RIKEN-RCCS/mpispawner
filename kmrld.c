@@ -44,7 +44,7 @@
     the definitions of these structures. */
 
 static char const
-kmr_id[]="$x: Executable reloader; See https://github.com/pf-aics-riken/kmr $";
+kmr_ld_id[] = "$x: Executable Reloader for KMR; See https://github.com/pf-aics-riken/mpispawner $";
 
 /* (Define _GNU_SOURCE for dlinfo). */
 
@@ -78,6 +78,10 @@ kmr_id[]="$x: Executable reloader; See https://github.com/pf-aics-riken/kmr $";
 #include <assert.h>
 
 #include "kmrld.h"
+
+/* Name of this library. */
+
+#define KMR_KMRSPAWN "libkmrspawn.so"
 
 /* MEMO: dl_map_object_deps() [in elf/dl-deps.c] calls
    _dl_map_object() [in elf/dl-load.c].  _dl_map_object() calls
@@ -129,25 +133,40 @@ struct CPYREL {
     struct SYMMAP def;
 };
 
-/* The values of the initial a.out. */
+/* The type of _rtld_global_ro._dl_lookup_symbol_x.  It holds a
+   pointer to an internal ld.so routine. */
+
+typedef struct link_map *(*kmr_lookupfn_t)(const char *,
+					   struct link_map *,
+					   const Elf64_Sym **,
+					   struct r_scope_elem *[],
+					   const struct r_found_version *,
+					   int, int,
+					   struct link_map *);
+
+/* Information of the initial executable. */
 
 static struct {
     Elf64_Addr map_end;
     ptrdiff_t tls_offset;
     size_t tls_size;
-    char **oargv;
-    char **oenvv;
+    char **old_argv;
+    char **old_envv;
+
+    _Bool copy_data_segment;
+    _Bool loader_preloaded;
+
+    int n_fjmpg_pages;
     struct {
 	Elf64_Addr p;
 	size_t size;
 	int prot;
     } fjmpg_pages[4];
-    int n_fjmpg_pages;
-    _Bool copy_data_segment;
-    _Bool preload_hooks;
-} kmr_start_info = {0};
+} kmr_exec_info = {.map_end = 0};
 
-static struct link_map *kmr_aout = 0;
+/* Link-map of the executable. */
+
+static struct link_map *kmr_aout_map = 0;
 
 /* Copy-relocations found in an old a.out.  They need to be unbound
    and rebound during loading a new a.out. */
@@ -165,11 +184,17 @@ static struct r_found_version kmr_versions_area[20];
 static char kmr_new_argv_strings[1024];
 static char *kmr_new_argv[32];
 
+/* Trace printer verbosity (kmr_ld_trace in 0..3). */
+
+static int kmr_ld_trace = MSG;
+
+/* Prints error/warning messages. */
+
+static void kmr_print_errors(int err, char *format, ...);
+
 /* Error printer. */
 
-static int kmr_ld_trace = 0;
-
-void (*kmr_ld_err)(int, char *, ...) = 0;
+void (*kmr_ld_err)(int, char *, ...) = kmr_print_errors;
 
 /* A value that MPG pages (large pages on K) are aligned to.  NOTE:
    The use of MPG pages which are initially mapped should be detected,
@@ -179,17 +204,6 @@ void (*kmr_ld_err)(int, char *, ...) = 0;
    pages.  See kmr_check_pages_mappable(). */
 
 static const size_t kmr_fjmpg_alignment = (128 * 1024 * 1024);
-
-#if 0 /*AHO*/
-/* Severity level for the error printer. */
-
-enum {
-    DIE = 0,
-    ERR = 1,
-    WRN = 2,
-    MSG = 3
-};
-#endif
 
 #define KMR_CHECK_POWERS2(X) (((X) & ((X) - 1)) == 0)
 
@@ -238,7 +252,7 @@ kmr_floor_to_align(Elf64_Addr p, size_t align)
    list of {"libgomp.so", "libpthread.so", 0}. */
 
 static _Bool
-kmr_check_library_name(char *name, char **list, _Bool null_is_hit)
+kmr_check_library_name(char *name, char **list, int /*_Bool*/ null_is_hit)
 {
     _Bool hit;
     if (name == 0) {
@@ -299,12 +313,16 @@ static char *
 kmr_get_so_name(struct link_map *m)
 {
     struct link_map *ldso = &_rtld_global._dl_rtld_map;
-    struct link_map *p;
-    p = m;
-    while (p != 0 && p->l_prev != 0) {
-	p = p->l_prev;
+
+    struct link_map *m0;
+    {
+	struct link_map *p;
+	p = m;
+	while (p != 0 && p->l_prev != 0) {
+	    p = p->l_prev;
+	}
+	m0 = p;
     }
-    struct link_map *m0 = p;
 
     if (m == 0) {
 	return "(nil)";
@@ -343,7 +361,7 @@ kmr_print_errors(int err, char *format, ...)
     }
 }
 
-void
+static void
 kmr_backtrace_on_signal(int sig, siginfo_t *i, void *x)
 {
     struct sigaction sa;
@@ -362,10 +380,10 @@ kmr_backtrace_on_signal(int sig, siginfo_t *i, void *x)
     backtrace_symbols_fd(pc, n, fileno(stderr));
 }
 
-/* Set signal handlers to a backtrace printer for debugging. */
+/* Set signal handlers to a backtrace-printer for debugging. */
 
 static void
-kmr_set_backtrace_printer(int sigs[])
+kmr_install_backtrace_printer(int sigs[])
 {
     struct sigaction sa0, sa1;
     int cc;
@@ -487,7 +505,6 @@ kmr_dump_tls_info(void)
 
 #if 0
     if (0) {
-	/*AHO*/
 	for (struct link_map *m = m0; m != 0; m = m->l_next) {
 	    char *name = kmr_get_so_name(m);
 	    /*printf("so=%p %s\n", m, name); fflush(0);*/
@@ -514,15 +531,13 @@ kmr_dump_tls_info(void)
 static void
 kmr_dump_scope_info(struct link_map *m)
 {
-    /*AHO*/
-    /*for (int t = 0; t < nmaps; t++) {*/
     printf("Dump scope for %s:\n", kmr_get_so_name(m)); fflush(0);
     if (m->l_scope ==0) {
 	printf("no scope.\n"); fflush(0);
     } else {
 	for (int i = 0; m->l_scope[i] != 0; i++) {
 	    printf("scope[%d]:", i);
-	    for (int j = 0; j < m->l_scope[i]->r_nlist; j++) {
+	    for (int j = 0; j < (int)m->l_scope[i]->r_nlist; j++) {
 		printf(" %s", kmr_get_so_name(m->l_scope[i]->r_list[j]));
 	    }
 	    printf(".\n");
@@ -544,26 +559,26 @@ kmr_mmap_segment(Elf64_Addr s, size_t len, size_t extlen,
 {
     Elf64_Addr pagesize = kmr_get_page_size1();
     char *s0 = (void *)kmr_floor_to_align(s, pagesize);
-    size_t shift = ((char *)s - s0);
-    size_t maplen = (len + shift);
+    off_t shift = ((char *)s - s0);
+    size_t maplen0 = (size_t)(len + shift);
     //size_t mapextlen = (extlen + shift);
-    size_t mapoff = (off - shift);
+    off_t mapoff = (off - shift);
     assert(off >= shift);
     int cc;
 
     if (len != 0) {
-	(*kmr_ld_err)(MSG, "  mmap(%p, 0x%zx, 0x%zx).\n", s0, maplen, mapoff);
-	void *m = mmap(s0, maplen, prot, flags, fd, mapoff);
+	(*kmr_ld_err)(MSG, "  mmap(%p, 0x%zx, 0x%zx).\n", s0, maplen0, mapoff);
+	void *m = mmap(s0, maplen0, prot, flags, fd, mapoff);
 	if (m == MAP_FAILED) {
 	    (*kmr_ld_err)(DIE, "mmap(%p, 0x%zx, 0x%zx): %s.\n",
-			  s0, maplen, mapoff, strerror(errno));
+			  s0, maplen0, mapoff, strerror(errno));
 	    abort();
 	}
     }
 
     char *zerostart = (void *)(s + len);
     char *zeroend = (void *)(s + extlen);
-    char *zeropage = (void *)kmr_ceiling_to_align((intptr_t)zerostart, pagesize);
+    char *zeropage = (void *)kmr_ceiling_to_align((Elf64_Addr)zerostart, pagesize);
 
     if (len != 0 && zerostart < zeropage) {
 	char *lastpage = (zeropage - pagesize);
@@ -576,7 +591,7 @@ kmr_mmap_segment(Elf64_Addr s, size_t len, size_t extlen,
 		abort();
 	    }
 	}
-	memset(zerostart, 0, (zeropage - zerostart));
+	memset(zerostart, 0, (size_t)(zeropage - zerostart));
 	if ((prot & PROT_WRITE) == 0) {
 	    cc = mprotect(lastpage, pagesize, prot);
 	    if (cc != 0) {
@@ -588,13 +603,13 @@ kmr_mmap_segment(Elf64_Addr s, size_t len, size_t extlen,
     }
 
     if (zeropage < zeroend) {
-	size_t maplen = (zeroend - zeropage);
-	(*kmr_ld_err)(MSG, "  mmap(%p, 0x%zx, anon).\n", zeropage, maplen);
-	void *m = mmap(zeropage, maplen,
-		       prot, (MAP_ANON|MAP_PRIVATE|MAP_FIXED), -1, 0);
+	size_t maplen1 = (zeroend - zeropage);
+	(*kmr_ld_err)(MSG, "  mmap(%p, 0x%zx, anon).\n", zeropage, maplen1);
+	void *m = mmap(zeropage, maplen1,
+		       prot, (MAP_ANON|MAP_PRIVATE|MAP_FIXED), -1, (off_t)0);
 	if (m == MAP_FAILED) {
 	    (*kmr_ld_err)(DIE, "mmap(%p, 0x%zx, anon): %s.\n",
-			  zeropage, maplen, strerror(errno));
+			  zeropage, maplen1, strerror(errno));
 	    abort();
 	}
     }
@@ -609,10 +624,10 @@ kmr_copy_segment(Elf64_Addr s, size_t len, size_t extlen,
 {
     Elf64_Addr pagesize = kmr_get_page_size1();
     char *s0 = (void *)kmr_floor_to_align(s, pagesize);
-    size_t shift = ((char *)s - s0);
-    size_t maplen = (len + shift);
-    size_t mapextlen = (extlen + shift);
-    size_t mapoff = (off - shift);
+    off_t shift = ((char *)s - s0);
+    size_t maplen = (size_t)(len + shift);
+    size_t mapextlen = (extlen + (size_t)shift);
+    off_t mapoff = (off - shift);
     assert(off >= shift);
     int cc;
 
@@ -796,15 +811,15 @@ kmr_prot_from_header(Elf64_Word flags) {
 static _Bool
 kmr_check_pages_mappable(Elf64_Addr s, size_t len)
 {
-    if (!kmr_start_info.copy_data_segment) {
+    if (!kmr_exec_info.copy_data_segment) {
 	return 1;
     } else {
 	Elf64_Addr s0 = s;
 	Elf64_Addr e0 = (s + len);
 	_Bool overlaps = 0;
-	for (int i = 0; i < kmr_start_info.n_fjmpg_pages; i++) {
-	    Elf64_Addr s1 = kmr_start_info.fjmpg_pages[i].p;
-	    Elf64_Addr e1 = (s + kmr_start_info.fjmpg_pages[i].size);
+	for (int i = 0; i < kmr_exec_info.n_fjmpg_pages; i++) {
+	    Elf64_Addr s1 = kmr_exec_info.fjmpg_pages[i].p;
+	    Elf64_Addr e1 = (s + kmr_exec_info.fjmpg_pages[i].size);
 	    if (!((e1 <= s0) || (e0 <= s1))) {
 		overlaps = 1;
 		break;
@@ -842,17 +857,17 @@ kmr_record_fjmpg_pages(struct link_map *m0)
 		(*kmr_ld_err)(MSG, "Record mpg-mapped page %p,"
 			      " size=0x%zx, prot=0x%x.\n",
 			      (void *)s0, size, prot);
-		int N = (sizeof(kmr_start_info.fjmpg_pages)
-			 /sizeof(kmr_start_info.fjmpg_pages[0]));
-		if (kmr_start_info.n_fjmpg_pages >= N) {
+		int N = (sizeof(kmr_exec_info.fjmpg_pages)
+			 /sizeof(kmr_exec_info.fjmpg_pages[0]));
+		if (kmr_exec_info.n_fjmpg_pages >= N) {
 		    (*kmr_ld_err)(DIE, "Many pages are mpg-mapped.\n");
 		    abort();
 		}
-		int i = kmr_start_info.n_fjmpg_pages;
-		kmr_start_info.fjmpg_pages[i].p = (Elf64_Addr)s0;
-		kmr_start_info.fjmpg_pages[i].size = size;
-		kmr_start_info.fjmpg_pages[i].prot = prot;
-		kmr_start_info.n_fjmpg_pages++;
+		int j = kmr_exec_info.n_fjmpg_pages;
+		kmr_exec_info.fjmpg_pages[j].p = (Elf64_Addr)s0;
+		kmr_exec_info.fjmpg_pages[j].size = size;
+		kmr_exec_info.fjmpg_pages[j].prot = prot;
+		kmr_exec_info.n_fjmpg_pages++;
 	    }
 	}
     }
@@ -887,7 +902,8 @@ kmr_unmap_old_aout(Elf64_Addr addr, Elf64_Phdr *phdrs, int phnum)
 		}
 	    } else {
 		int prot = kmr_prot_from_header(ph->p_flags);
-		kmr_copy_segment((Elf64_Addr)s0, 0, maplen, prot, 0, 0, 0, 0);
+		kmr_copy_segment((Elf64_Addr)s0, (size_t)0, maplen,
+				 prot, 0, (off_t)0, 0, (size_t)0);
 	    }
 	}
     }
@@ -966,8 +982,8 @@ kmr_load_needed_so(char *image, size_t size, struct link_map *m0)
     //Elf64_Phdr *phdrs = (Elf64_Phdr *)(image + ehdr->e_phoff);
     Elf64_Shdr *shdrs = (Elf64_Shdr *)(image + ehdr->e_shoff);
 
-    char *needed[100];
-    int nneeded = 0;
+    char *needs[100];
+    int nneeds = 0;
     for (int i = 0; i < ehdr->e_shnum; i++) {
 	Elf64_Shdr *sh = &shdrs[i];
 	if (sh->sh_type == SHT_DYNAMIC) {
@@ -1009,9 +1025,9 @@ kmr_load_needed_so(char *image, size_t size, struct link_map *m0)
 			(*kmr_ld_err)(MSG, "  %s (already loaded).\n", s);
 		    } else {
 			/*printf("so=%s needed.\n", s);*/
-			assert(nneeded < (sizeof(needed)/sizeof(needed[0])));
-			needed[nneeded] = s;
-			nneeded++;
+			assert(nneeds < (int)(sizeof(needs)/sizeof(needs[0])));
+			needs[nneeds] = s;
+			nneeds++;
 		    }
 		    break;
 		}
@@ -1035,11 +1051,11 @@ kmr_load_needed_so(char *image, size_t size, struct link_map *m0)
 
     /* Load needed, and set dependency as required by a.out. */
 
-    for (int i = 0; i < nneeded; i++) {
-	(*kmr_ld_err)(MSG, "  %s loading...\n", needed[i]); fflush(0);
-	struct link_map *m = dlopen(needed[i], (RTLD_NOW|RTLD_GLOBAL));
+    for (int i = 0; i < nneeds; i++) {
+	(*kmr_ld_err)(MSG, "  %s loading...\n", needs[i]); fflush(0);
+	struct link_map *m = dlopen(needs[i], (RTLD_NOW|RTLD_GLOBAL));
 	if (m == 0) {
-	    (*kmr_ld_err)(DIE, "dlopen(%s): %s.\n", needed[i], dlerror());
+	    (*kmr_ld_err)(DIE, "dlopen(%s): %s.\n", needs[i], dlerror());
 	    abort();
 	}
 	assert(m->l_loader == 0);
@@ -1058,7 +1074,7 @@ kmr_change_aout_name(char ** argv, char *name)
 {
     char *args = argv[0];
     char *arge = (char *)environ[0];
-    int sz = (arge - args);
+    size_t sz = (size_t)(arge - args);
 
     memset(args, 0, sz);
     snprintf(args, sz, name);
@@ -1076,6 +1092,7 @@ kmr_change_aout_name(char ** argv, char *name)
 static void
 kmr_reset_link_map(struct link_map *m0, char *image, size_t size)
 {
+    const Elf64_Addr ADDRMAX = 0xefffffffffffffffUL;
     Elf64_Ehdr *ehdr = (Elf64_Ehdr *)image;
     Elf64_Phdr *phdrs = (Elf64_Phdr *)(image + ehdr->e_phoff);
 
@@ -1086,7 +1103,7 @@ kmr_reset_link_map(struct link_map *m0, char *image, size_t size)
     m0->l_phdr = phdrs;
     m0->l_phnum = ehdr->e_phnum;
     m0->l_entry = ehdr->e_entry; /*(*user_entry)*/
-    m0->l_map_start = ~0;
+    m0->l_map_start = (Elf64_Addr)ADDRMAX;
     m0->l_map_end = 0;
     m0->l_text_end = 0;
     m0->l_direct_opencount = 1;
@@ -1150,10 +1167,10 @@ kmr_reset_link_map(struct link_map *m0, char *image, size_t size)
     }
 
     if (m0->l_map_end == 0) {
-	m0->l_map_end = ~0;
+	m0->l_map_end = (Elf64_Addr)ADDRMAX;
     }
     if (m0->l_text_end == 0) {
-	m0->l_text_end = ~0;
+	m0->l_text_end = (Elf64_Addr)ADDRMAX;
     }
 }
 
@@ -1167,7 +1184,7 @@ kmr_reset_link_map(struct link_map *m0, char *image, size_t size)
 #define VERSYMIDX(tag) (DT_NUM + DT_THISPROCNUM + DT_VERSIONTAGIDX(tag))
 
 static inline void
-kmr_adjust_dyn_info(Elf64_Xword tag, Elf64_Dyn **info, Elf64_Addr addr)
+kmr_adjust_dyn_info(int /*Elf64_Xword*/ tag, Elf64_Dyn **info, Elf64_Addr addr)
 {
     if (info[tag] != 0) {
 	info[tag]->d_un.d_ptr += addr;
@@ -1210,6 +1227,8 @@ static void kmr_setup_hashtable(struct link_map *m);
 static void
 kmr_setup_link_map(struct link_map *m0, char *image, size_t size)
 {
+    const Elf64_Addr ADDRMAX = 0xefffffffffffffffUL;
+
     Elf64_Ehdr *ehdr = (Elf64_Ehdr *)image;
     Elf64_Phdr *phdrs = (Elf64_Phdr *)(image + ehdr->e_phoff);
     struct link_map *ldso = &_rtld_global._dl_rtld_map;
@@ -1228,7 +1247,7 @@ kmr_setup_link_map(struct link_map *m0, char *image, size_t size)
     m0->l_versyms = 0;
 
     m0->l_entry = ehdr->e_entry; /*(*user_entry)*/
-    m0->l_map_start = ~0;
+    m0->l_map_start = (Elf64_Addr)ADDRMAX;
     m0->l_map_end = 0;
     m0->l_text_end = 0;
     m0->l_direct_opencount = 1;
@@ -1336,10 +1355,10 @@ kmr_setup_link_map(struct link_map *m0, char *image, size_t size)
     assert(m0->l_phdr != 0 && m0->l_ld != 0);
 
     if (m0->l_map_end == 0) {
-	m0->l_map_end = ~0;
+	m0->l_map_end = (Elf64_Addr)ADDRMAX;
     }
     if (m0->l_text_end == 0) {
-	m0->l_text_end = ~0;
+	m0->l_text_end = (Elf64_Addr)ADDRMAX;
     }
 
     /*assert(m0->l_info[DT_SONAME] != 0);*/
@@ -1403,7 +1422,7 @@ kmr_setup_link_map(struct link_map *m0, char *image, size_t size)
       _rtld_global._dl_ns[LM_ID_BASE]._ns_main_searchlist,
       sizeof(struct r_scope_elem)) == 0);*/
 
-    /*AHO*/ /* FALSE VALUE */
+    /* FALSE VALUE */
     m0->l_contiguous = 1;
 }
 
@@ -1423,7 +1442,6 @@ kmr_setup_dynamic_info(struct link_map *m)
 	assert(tag != DT_VERDEF && tag != DT_VERDEFNUM);
 	if (tag < DT_NUM) {
 	    info[tag] = d;
-	    /*AHO*/
 	    if (tag == DT_DEBUG) {
 		/*printf("See DT_DEBUG in l_ld (%p).\n", d); fflush(0);*/
 	    }
@@ -1432,7 +1450,6 @@ kmr_setup_dynamic_info(struct link_map *m)
 	    info[tag - DT_LOPROC + DT_NUM] = d;
 	} else if (DT_VERSIONTAGIDX(tag) < DT_VERSIONTAGNUM) {
 	    info[VERSYMIDX(tag)] = d;
-	    /*AHO*/
 	    if (tag == DT_VERSYM) {
 		/*printf("See DT_VERSYM in l_ld.\n"); fflush(0);*/
 	    }
@@ -1458,8 +1475,8 @@ kmr_setup_dynamic_info(struct link_map *m)
 
     if (m->l_addr != 0) {
 	Elf64_Addr addr = m->l_addr;
-	long off5 = (DT_NUM + DT_THISPROCNUM + DT_VERSIONTAGNUM
-		     + DT_EXTRANUM + DT_VALNUM);
+	int off5 = (DT_NUM + DT_THISPROCNUM + DT_VERSIONTAGNUM
+		    + DT_EXTRANUM + DT_VALNUM);
 	kmr_adjust_dyn_info(DT_HASH, info, addr);
 	kmr_adjust_dyn_info(DT_PLTGOT, info, addr);
 	kmr_adjust_dyn_info(DT_STRTAB, info, addr);
@@ -1532,7 +1549,7 @@ kmr_setup_versions_info(struct link_map *m)
 		Elf64_Vernaux *naux = (void *)((char *)e + e->vn_aux);
 		for (Elf64_Vernaux *a = naux; a != 0; a = VNA_NEXT(a)) {
 		    Elf64_Half i = (a->vna_other & 0x7fff);
-		    nversions = MAX(nversions, (i + 1));
+		    nversions = MAX(nversions, (unsigned int)(i + 1));
 		}
 	    }
 	}
@@ -1637,16 +1654,6 @@ kmr_aref_relaz(struct RELAZ reloc, int i, Elf64_Rela *ra)
     }
 }
 
-/* The value of _rtld_global_ro._dl_lookup_symbol_x */
-
-static struct link_map *(*kmr_lookup_symbol)(const char *,
-					     struct link_map *,
-					     const Elf64_Sym **,
-					     struct r_scope_elem *[],
-					     const struct r_found_version *,
-					     int, int,
-					     struct link_map *);
-
 static void kmr_relocate_elf_dynamic(int isa, struct link_map *m,
 				     struct RELAZ reloc, int nreloc,
 				     void (*fn)(int isa, struct link_map *m,
@@ -1675,7 +1682,6 @@ kmr_relocate_so(int isa, struct link_map *m,
 
     /* [ELF_DYNAMIC_RELOCATE() in elf/dynamic-link.h] */
 
-    /*AHO*/
     /*elf_machine_runtime_setup(m, lazy, 0);*/
     /* [elf_machine_runtime_setup() in sysdeps/x86_64/dl-machine.h]. */
 
@@ -1785,7 +1791,7 @@ kmr_get_symbol_version(struct SYMMAP *ref, Elf64_Rela *r)
     struct r_found_version *version;
     if (m->l_info[VERS] != 0) {
 	Elf64_Sym *symtab = (void *)m->l_info[DT_SYMTAB]->d_un.d_ptr;
-	long index = (ref->sym - symtab);
+	unsigned long index = (ref->sym - symtab);
 	assert(ELF64_R_SYM(r->r_info) == index);
 	Elf64_Half *vv = (void *)(m->l_info[VERS]->d_un.d_ptr);
 	Elf64_Half n = (vv[index] & 0x7fff);
@@ -1803,6 +1809,8 @@ kmr_get_symbol_version(struct SYMMAP *ref, Elf64_Rela *r)
 static struct SYMMAP
 kmr_resolve_map(int isa, struct SYMMAP *ref, Elf64_Rela *r, struct link_map *m)
 {
+    kmr_lookupfn_t lookup = _rtld_global_ro._dl_lookup_symbol_x;
+
     struct SYMMAP def;
     if (ELF64_ST_BIND(ref->sym->st_info) == STB_LOCAL) {
 	def = *ref;
@@ -1814,9 +1822,9 @@ kmr_resolve_map(int isa, struct SYMMAP *ref, Elf64_Rela *r, struct link_map *m)
 	int tc = kmr_get_relocation_class(isa, relty);
 
 	def.sym = ref->sym;
-	def.map = (*kmr_lookup_symbol)(name, m, &def.sym,
-				       m->l_scope, version, tc,
-				       DL_LOOKUP_ADD_DEPENDENCY, 0);
+	def.map = (*lookup)(name, m, &def.sym,
+			    m->l_scope, version, tc,
+			    DL_LOOKUP_ADD_DEPENDENCY, 0);
 	if (kmr_ld_trace == 3) {
 	    (*kmr_ld_err)(MSG, "  Lookup_symbol (%s) ref=%s, def=%s\n",
 			  name, kmr_get_so_name(m), kmr_get_so_name(def.map));
@@ -2071,7 +2079,7 @@ kmr_bind_elf_x86(int isa, struct link_map *m,
 	unsigned int *addr = (void *)slot;
 	Elf64_Addr value1 = (value - (Elf64_Addr)slot);
 	*addr = value1;
-	if (value1 != (int)value1) {
+	if (value1 != (unsigned int)value1) {
 	    (*kmr_ld_err)(ERR, "Symbol '%s' causes overflow"
 			  " in R_X86_64_PC32 relocation.\n", name);
 	}
@@ -2082,7 +2090,7 @@ kmr_bind_elf_x86(int isa, struct link_map *m,
 	/*printf("R_X86_64_COPY (%s).\n", name); fflush(0);*/
 	struct SYMMAP def = kmr_resolve_map(isa, &ref, r, m);
 	if (def.sym != 0) {
-	    Elf64_Addr value = kmr_get_symbol_value(&def, 0);
+	    Elf64_Addr value = kmr_get_symbol_value(&def, (Elf64_Sxword)0);
 	    if (def.sym->st_size != ref.sym->st_size) {
 		(*kmr_ld_err)(ERR, "Symbol '%s' (copy-relocation)"
 			      " has different sizes.\n", name);
@@ -2115,7 +2123,7 @@ kmr_bind_elf_x86(int isa, struct link_map *m,
 static inline void
 kmr_bind_plt_sparc(struct link_map *m, const Elf64_Rela *r,
 		   Elf64_Addr *slot, Elf64_Addr value,
-		   _Bool plt32768, int t)
+		   int /*_Bool*/ plt32768, int t)
 {
 #ifdef __sparc__
     unsigned int *insns0 = (unsigned int *)slot;
@@ -2256,7 +2264,7 @@ kmr_bind_elf_sparc(int isa, struct link_map *m,
     case R_SPARC_COPY: {
 	struct SYMMAP def = kmr_resolve_map(isa, &ref, r, m);
 	if (def.sym != 0) {
-	    Elf64_Addr value = kmr_get_symbol_value(&def, 0);
+	    Elf64_Addr value = kmr_get_symbol_value(&def, (Elf64_Sxword)0);
 	    if (def.sym->st_size != ref.sym->st_size) {
 		(*kmr_ld_err)(ERR, "Symbol '%s' (copy-relocation)"
 			      " has different sizes.\n", name);
@@ -2531,8 +2539,8 @@ kmr_find_copy_relocations(int isa, struct link_map *m,
 
     if (relty == R_X86_64_COPY || relty == R_SPARC_COPY) {
 	Elf64_Sym *symtab = (void *)m->l_info[DT_SYMTAB]->d_un.d_ptr;
-	Elf64_Sym *sym = &symtab[ELF64_R_SYM(r->r_info)];
-	struct SYMMAP ref = {.map = m, .sym = sym};
+	Elf64_Sym *sym0 = &symtab[ELF64_R_SYM(r->r_info)];
+	struct SYMMAP ref = {.map = m, .sym = sym0};
 	char *name = kmr_get_name(&ref);
 
 	int n = (sizeof(kmr_copy_relocs) / sizeof(kmr_copy_relocs[0]));
@@ -2542,13 +2550,13 @@ kmr_find_copy_relocations(int isa, struct link_map *m,
 	    def = kmr_resolve_map(isa, &ref, r, m);
 	} else {
 	    /* IN REBINDING, DEFINITION SHOULD BE IN THE A.OUT. */
-	    char *name = kmr_get_name(&ref);
-	    Elf64_Sym *sym = kmr_lookup_in_so(kmr_relocation_binder, name);
-	    def.sym = sym;
+	    Elf64_Sym *sym1 = kmr_lookup_in_so(kmr_relocation_binder, name);
+	    def.sym = sym1;
 	    def.map = kmr_relocation_binder;
 	}
 	(*kmr_ld_err)(MSG, "  Find R_COPY (%s) ref=%s, def=%s.\n",
-		      name, kmr_get_so_name(ref.map), kmr_get_so_name(def.map));
+		      name, kmr_get_so_name(ref.map),
+		      kmr_get_so_name(def.map));
 	if (def.sym == 0) {
 	    (*kmr_ld_err)(WRN, "Find copy-relocation from unknown (%s).\n",
 			  name);
@@ -2561,7 +2569,7 @@ kmr_find_copy_relocations(int isa, struct link_map *m,
 	if (kmr_relocation_binder == 0 && def.sym != 0) {
 	    /* Move content when unbinding. */
 	    assert(def.sym->st_size == ref.sym->st_size);
-	    Elf64_Addr value = kmr_get_symbol_value(&def, 0);
+	    Elf64_Addr value = kmr_get_symbol_value(&def, (Elf64_Sxword)0);
 	    size_t sz = MIN(def.sym->st_size, ref.sym->st_size);
 	    memcpy((void *)value, slot, sz);
 	    (*kmr_ld_err)(MSG, "  R_COPY (%s) memcpy(%p, %p, %ld).\n",
@@ -2962,10 +2970,10 @@ kmr_reset_tls_space(struct link_map *m0, char **skipreset)
     /* Calculate a TLS offset of the new a.out. */
 
     size_t size = m0->l_tls_blocksize;
-    if (size <= kmr_start_info.tls_size) {
+    if (size <= kmr_exec_info.tls_size) {
 	/* (TLS fits in the old space). */
 	(*kmr_ld_err)(MSG, "TLS fits in the old space.\n");
-	m0->l_tls_offset = kmr_start_info.tls_offset;
+	m0->l_tls_offset = kmr_exec_info.tls_offset;
     } else {
 	(*kmr_ld_err)(DIE, "TLS does not fix in the old space.\n");
 	abort();
@@ -3016,25 +3024,114 @@ static int kmr_make_preloaded(struct link_map *m0);
 static void kmr_restart_x86(int isa, void *entrypoint, char **argv);
 static void kmr_restart_sparc(int isa, void *entrypoint, char **argv);
 
-/* Restart with a new a.out.  It takes a new argv vector, an old argv
-   vector, and some options.  It is like execve() but "path" is
-   argv[0] and "envp" is implicit. */
+/* Sets the error/warning message printer.  LEVEL is 0 to 3.  PRINTER
+   can be a null. */
 
 void
-kmr_ld_usoexec(char **argv, char **oldargv, long flags,
-	       void (*errfn)(int, char *, ...), char *heapbottom)
+kmr_ld_set_error_printer(int level, void (*printer)(int, char *, ...))
+{
+    assert(0 <= level && level <= MSG);
+    kmr_ld_err = ((printer != 0) ?  printer : kmr_print_errors);
+    kmr_ld_trace = level;
+}
+
+/* Returns the size of the symbol, or returns -1 when not found.  It
+   first tests the existence of the symbol by dlsym(), because
+   _dl_lookup_symbol_x() aborts inside. */
+
+long
+kmr_ld_get_symbol_size(char *name)
+{
+    kmr_lookupfn_t lookup = _rtld_global_ro._dl_lookup_symbol_x;
+
+    int cc;
+
+    void *p = dlsym(RTLD_DEFAULT, name);
+    if (p == 0) {
+	return -1;
+    } else {
+	struct link_map *m0 = 0;
+
+	{
+	    void *ma = dlopen(0, (RTLD_NOW|RTLD_GLOBAL|RTLD_NOLOAD));
+	    if (ma == 0) {
+		(*kmr_ld_err)(DIE, "dlopen(0): %s.\n", dlerror());
+		abort();
+	    }
+	    cc = dlinfo(ma, RTLD_DI_LINKMAP, &m0);
+	    if (cc == -1) {
+		(*kmr_ld_err)(DIE, "dlinfo(a.out): %s.\n", dlerror());
+		abort();
+	    }
+	    cc = dlclose(ma);
+	    if (cc != 0) {
+		(*kmr_ld_err)(DIE, "dlclose(0): %s.\n", dlerror());
+		abort();
+	    }
+	}
+
+	const Elf64_Sym *s = 0;
+	struct link_map *m = (*lookup)(name, m0, &s,
+				       m0->l_scope, 0, 0,
+				       DL_LOOKUP_ADD_DEPENDENCY, 0);
+	if (m != 0) {
+	    return (*s).st_size;
+	} else {
+	    return -1;
+	}
+    }
+}
+
+/* Restart a new a.out with an ARGV vector.  It is like execve() but
+   "path" is argv[0] and "envp" is implicit.  The other arguments are
+   only effective at the first call.  They can be zero for later
+   calls.  OLDARGV is an original argv pointer which is used to
+   replace the command line strings visible in core dumps.  FLAGS are
+   bits.  The 0x10 bit indicates to memcpy() the data segment instead
+   of mmap().  The 0x100 bit indicates to make this library as
+   preloaded.  HEAPBOTTOM specifies the lower bound of heaps. */
+
+void
+kmr_ld_usoexec(char **argv, char **oldargv, long flags, char *heapbottom)
 {
     int cc;
 
-    kmr_ld_err = ((errfn != 0) ?  errfn : kmr_print_errors);
-    kmr_ld_trace = (flags & 0x3);
+    /*kmr_ld_err = ((errfn != 0) ?  errfn : kmr_print_errors);*/
+    /*kmr_ld_trace = (flags & 0x3);*/
     _Bool copy_data_segment = ((flags & 0x10) != 0);
-    _Bool preload_hooks = ((flags & 0x100) != 0);
+    _Bool loader_preloaded = ((flags & 0x100) != 0);
 
-    if (kmr_ld_trace == 3) {
-	/* (FOR DEBUGGING) */
+    if (kmr_ld_trace > 0) {
 	int sigs[] = {SIGSEGV, SIGILL, 0};
-	kmr_set_backtrace_printer(sigs);
+	kmr_install_backtrace_printer(sigs);
+    }
+
+    int oldargc = (long)oldargv[-1];
+    if (oldargv[oldargc] != 0) {
+	(*kmr_ld_err)(DIE, "Bad format in old argv.\n");
+	abort();
+    }
+
+    /* Check the ISA of the running machine. */
+
+    int isa;
+
+    {
+	struct utsname u;
+	cc = uname(&u);
+	assert(cc == 0);
+	if (strcmp("x86_64", u.machine) == 0) {
+	    isa = EM_X86_64;
+	} else if (strcmp("s64fx", u.machine) == 0) {
+	    isa = EM_SPARCV9;
+	} else if (strcmp("sun4u", u.machine) == 0) {
+	    isa = EM_SPARCV9;
+	} else {
+	    isa = 0;
+	    (*kmr_ld_err)(DIE, "Bad machine, unsupported: %s.\n", u.machine);
+	    abort();
+	}
+	assert(isa != 0);
     }
 
     /* Copy arguments in case they are in text/data. */
@@ -3065,7 +3162,7 @@ kmr_ld_usoexec(char **argv, char **oldargv, long flags,
 		(*kmr_ld_err)(DIE, "Bad argv, strings not fit in buffer.\n");
 		abort();
 	    }
-	    memcpy(p, argv[i], (n + 1));
+	    memcpy(p, argv[i], (size_t)(n + 1));
 	    kmr_new_argv[i] = p;
 	    p += (n + 1);
 	}
@@ -3075,31 +3172,13 @@ kmr_ld_usoexec(char **argv, char **oldargv, long flags,
     char *name = kmr_new_argv[0];
 
     if (kmr_ld_trace == 3) {
-	(*kmr_ld_err)(MSG, "Reloading: target=%s, nomap=%d, hooks=%d.\n",
-		      name, copy_data_segment, preload_hooks);
+	(*kmr_ld_err)(MSG, "Reloading: target=%s, nommap=%d, preload=%d.\n",
+		      name,
+		      kmr_exec_info.copy_data_segment,
+		      kmr_exec_info.loader_preloaded);
     }
 
     /*if (kmr_ld_trace == 3) {kmr_dump_tls_info();}*/
-
-    /* Check the ISA of the running machine. */
-
-    int isa;
-
-    {
-	struct utsname u;
-	cc = uname(&u);
-	assert(cc == 0);
-	if (strcmp("x86_64", u.machine) == 0) {
-	    isa = EM_X86_64;
-	} else if (strcmp("s64fx", u.machine) == 0) {
-	    isa = EM_SPARCV9;
-	} else {
-	    isa = 0;
-	    (*kmr_ld_err)(DIE, "Bad machine, unsupported: %s.\n", u.machine);
-	    abort();
-	}
-	assert(isa != 0);
-    }
 
     //(*kmr_ld_err)(MSG, "pagesize=%d.\n", kmr_get_page_size1());
     //printf("sizeof(struct link_map)=%ld\n", sizeof(struct link_map));
@@ -3144,7 +3223,7 @@ kmr_ld_usoexec(char **argv, char **oldargv, long flags,
 	    }
 	    (*kmr_ld_err)(MSG, "image(malloc)=%p.\n", image);
 	} else {
-	    image = mmap(0, size, (PROT_READ), (MAP_PRIVATE), fd, 0);
+	    image = mmap(0, size, (PROT_READ), (MAP_PRIVATE), fd, (off_t)0);
 	    if (image == MAP_FAILED) {
 		(*kmr_ld_err)(DIE, "mmap(%s): %s", name, strerror(errno));
 		abort();
@@ -3190,12 +3269,11 @@ kmr_ld_usoexec(char **argv, char **oldargv, long flags,
     }
 
     assert(m0old != 0);
+    kmr_aout_map = m0old;
 
     if (kmr_ld_trace == 3) {kmr_dump_link_maps(m0old);}
 
     kmr_check_structure_sizes_in_loaded_ldso(m0old);
-
-    kmr_lookup_symbol = _rtld_global_ro._dl_lookup_symbol_x;
 
     (*kmr_ld_err)(MSG, "Load the needed so...\n");
     kmr_load_needed_so(image, size, m0old);
@@ -3203,39 +3281,35 @@ kmr_ld_usoexec(char **argv, char **oldargv, long flags,
 
     /* Save settings of the initial call. */
 
-    if (kmr_start_info.map_end == 0) {
+    if (kmr_exec_info.map_end == 0) {
 	/* Do it once. */
-	int oargc = (long)oldargv[-1];
-	if (oldargv[oargc] != 0) {
-	    (*kmr_ld_err)(DIE, "The old argv has bad format (ignored).\n");
-	    abort();
-	}
-	kmr_start_info.map_end = MAX(m0old->l_map_end, (Elf64_Addr)heapbottom);
-	assert(kmr_start_info.map_end != 0);
-	kmr_start_info.tls_offset = m0old->l_tls_offset;
-	kmr_start_info.tls_size = m0old->l_tls_blocksize;
-	kmr_start_info.oargv = oldargv;
-	kmr_start_info.oenvv = &oldargv[oargc + 1];
-	kmr_start_info.copy_data_segment = copy_data_segment;
-	kmr_start_info.preload_hooks = preload_hooks;
-	if (copy_data_segment) {
+	kmr_exec_info.map_end = MAX(m0old->l_map_end, (Elf64_Addr)heapbottom);
+	assert(kmr_exec_info.map_end != 0);
+	kmr_exec_info.tls_offset = m0old->l_tls_offset;
+	kmr_exec_info.tls_size = m0old->l_tls_blocksize;
+
+	kmr_exec_info.old_argv = oldargv;
+	kmr_exec_info.old_envv = &oldargv[oldargc + 1];
+	kmr_exec_info.copy_data_segment = copy_data_segment;
+	kmr_exec_info.loader_preloaded = loader_preloaded;
+
+	if (kmr_exec_info.copy_data_segment) {
 	    kmr_record_fjmpg_pages(m0old);
 	}
-	if (preload_hooks) {
-	    (*kmr_ld_err)(MSG, "Change scope for libkmrld.so...\n");
+	if (kmr_exec_info.loader_preloaded) {
+	    char *libname = KMR_KMRSPAWN;
+    	    (*kmr_ld_err)(MSG, "Change scope for %s...\n", libname);
 	    kmr_make_preloaded(m0old);
-	    (*kmr_ld_err)(MSG, "Change scope for libkmrld.so done\n");
+	    (*kmr_ld_err)(MSG, "Change scope for %s done\n", libname);
 	}
-	assert(kmr_start_info.map_end != 0);
+	assert(kmr_exec_info.map_end != 0);
     }
 
     if (kmr_ld_trace == 3) {kmr_dump_link_maps(m0old);}
 
-    kmr_aout = 0;
-
     /* Reset the error function, which will become unusable. */
 
-    if (errfn != 0 && ((void *)errfn < (void *)kmr_start_info.map_end)) {
+    if ((void *)kmr_ld_err < (void *)kmr_exec_info.map_end) {
 	(*kmr_ld_err)(WRN, "Reset error function; given one unusable.\n");
 	kmr_ld_err = kmr_print_errors;
     }
@@ -3245,11 +3319,10 @@ kmr_ld_usoexec(char **argv, char **oldargv, long flags,
     sigset_t sigsetsave;
 
     {
-	int thrusigs[] = {SIGKILL, SIGSTOP,
-			  SIGBUS, SIGFPE, SIGILL, SIGSEGV,
-			  SIGHUP, SIGINT, SIGQUIT, SIGABRT, SIGTERM,
-			  SIGXCPU, SIGXFSZ, SIGPROF,
-			  SIGPWR, SIGSYS,
+	int thrusigs[] = {SIGKILL, SIGSTOP, SIGBUS, SIGFPE, SIGILL,
+			  SIGSEGV, SIGHUP, SIGINT, SIGQUIT, SIGABRT,
+			  SIGTERM, SIGXCPU, SIGXFSZ, SIGPROF, SIGPWR,
+			  SIGSYS,
 #ifdef SIGSTKFLT
 			  SIGSTKFLT,
 #endif
@@ -3266,15 +3339,17 @@ kmr_ld_usoexec(char **argv, char **oldargv, long flags,
 	}
     }
 
-    (*kmr_ld_err)(MSG, "Unbind the old copy-relocations...\n");
-    kmr_copy_relocs_count = 0;
-    kmr_relocate_so(isa, m0old, kmr_find_copy_relocations, 0);
-    if (kmr_copy_relocs_count > 0) {
-	for (struct link_map *p = m0old->l_next; p != 0; p = p->l_next) {
-	    kmr_relocate_so(isa, p, kmr_rebind_copy_relocations, 0);
+    {
+	(*kmr_ld_err)(MSG, "Unbind the old copy-relocations...\n");
+	kmr_copy_relocs_count = 0;
+	kmr_relocate_so(isa, m0old, kmr_find_copy_relocations, 0);
+	if (kmr_copy_relocs_count > 0) {
+	    for (struct link_map *p = m0old->l_next; p != 0; p = p->l_next) {
+		kmr_relocate_so(isa, p, kmr_rebind_copy_relocations, 0);
+	    }
 	}
+	(*kmr_ld_err)(MSG, "Unbind the old copy-relocations done.\n");
     }
-    (*kmr_ld_err)(MSG, "Unbind the old copy-relocations done.\n");
 
     /* Replace the a.out image. */
 
@@ -3284,7 +3359,7 @@ kmr_ld_usoexec(char **argv, char **oldargv, long flags,
 	struct link_map *m0 = m0old;
 
 	(*kmr_ld_err)(MSG, "Put the new command name (%s).\n", name);
-	kmr_change_aout_name(kmr_start_info.oargv, name);
+	kmr_change_aout_name(kmr_exec_info.old_argv, name);
 
 	/* Save the old PHDR for unmapping the old a.out. */
 
@@ -3323,27 +3398,29 @@ kmr_ld_usoexec(char **argv, char **oldargv, long flags,
 
     if (kmr_ld_trace == 3) {kmr_dump_link_maps(m0new);}
 
-    if (kmr_start_info.map_end < m0new->l_map_end) {
+    if (kmr_exec_info.map_end < m0new->l_map_end) {
 	(*kmr_ld_err)(DIE,
 		      ("New a.out has text+data+bss larger than the old"
 		       " (old-end=%p new-end=%p); heap will be corrupted.\n"),
-		      kmr_start_info.map_end, m0new->l_map_end);
+		      kmr_exec_info.map_end, m0new->l_map_end);
 	abort();
     }
 
-    (*kmr_ld_err)(MSG, "Relocate the new a.out...\n");
-    kmr_relocate_so(isa, m0new, kmr_bind_elf_machine, 0);
-    (*kmr_ld_err)(MSG, "Relocate the new a.out done.\n");
+    {
+	(*kmr_ld_err)(MSG, "Relocate the new a.out...\n");
+	kmr_relocate_so(isa, m0new, kmr_bind_elf_machine, 0);
+	(*kmr_ld_err)(MSG, "Relocate the new a.out done.\n");
 
-    (*kmr_ld_err)(MSG, "Rebind the new copy-relocations...\n");
-    kmr_copy_relocs_count = 0;
-    kmr_relocate_so(isa, m0new, kmr_find_copy_relocations, m0new);
-    if (kmr_copy_relocs_count > 0) {
-	for (struct link_map *p = m0new->l_next; p != 0; p = p->l_next) {
-	    kmr_relocate_so(isa, p, kmr_rebind_copy_relocations, m0new);
+	(*kmr_ld_err)(MSG, "Rebind the new copy-relocations...\n");
+	kmr_copy_relocs_count = 0;
+	kmr_relocate_so(isa, m0new, kmr_find_copy_relocations, m0new);
+	if (kmr_copy_relocs_count > 0) {
+	    for (struct link_map *p = m0new->l_next; p != 0; p = p->l_next) {
+		kmr_relocate_so(isa, p, kmr_rebind_copy_relocations, m0new);
+	    }
 	}
+	(*kmr_ld_err)(MSG, "Rebind the new copy-relocations done.\n");
     }
-    (*kmr_ld_err)(MSG, "Rebind the new copy-relocations done.\n");
 
     kmr_reset_tls_space(m0new, 0);
 
@@ -3365,10 +3442,10 @@ kmr_ld_usoexec(char **argv, char **oldargv, long flags,
 	(*kmr_ld_err)(MSG, "Reloaded the new executable.\n");
     }
 
-    kmr_aout = m0new;
+    assert(kmr_aout_map == m0new);
 
     /* Set up for the new a.out (unblock blocked signals, close files,
-       possibly run boehm GC to reclaim unfreed memory. */
+       and maybe run Boehm GC to reclaim unfreed memory. */
 
     {
 	/*(sigprocmask)*/
@@ -3377,16 +3454,18 @@ kmr_ld_usoexec(char **argv, char **oldargv, long flags,
 	    (*kmr_ld_err)(WRN, "pthread_sigmask(): %s", strerror(cc));
 	}
 
-	if (preload_hooks) {
+#if 0 /*GOMI?*/
+	if (kmr_exec_info.loader_preloaded) {
 	    void (*fn)(void) = (void (*)(void))dlsym(RTLD_DEFAULT,
 						     "kmr_ld_setup_hooks");
 	    if (fn != 0) {
 		(*fn)();
 	    }
 	}
+#endif
     }
 
-    /* Prepare arguments and start. */
+    /* Prepare arguments, and then start. */
 
     {
 	void *entrypoint = (void *)m0new->l_entry;
@@ -3395,11 +3474,11 @@ kmr_ld_usoexec(char **argv, char **oldargv, long flags,
 
 	volatile char s[8];
 	volatile char *sp = s;
-	assert(((char *)kmr_start_info.oargv - sp) > 100);
+	assert(((char *)kmr_exec_info.old_argv - sp) > 100);
 
 	/* Layout arguments at immediately before the old ENVP. */
 
-	char **envv = kmr_start_info.oenvv;
+	char **envv = kmr_exec_info.old_envv;
 	char **argvstack = &envv[-(argc + 1)];
 	for (int i = 0; i < argc; i++) {
 	    argvstack[i] = kmr_new_argv[i];
@@ -3427,14 +3506,14 @@ kmr_ld_usoexec(char **argv, char **oldargv, long flags,
     }
 }
 
-/* Moves this SO ("libkmrld.so.1") to the front of the scope (next to
+/* Moves this SO ("libkmrspawn.so") to the front of the scope (next to
    an a.out).  It is used to make MPI hooks work as preloaded.  It
    changes the order of scope entries. */
 
 static int
 kmr_make_preloaded(struct link_map *m0)
 {
-    char *name = "libkmrld.so";
+    char *name = KMR_KMRSPAWN;
     if (m0->l_scope == 0) {
 	(*kmr_ld_err)(WRN, "No scope information for a.out.\n");
 	return -1;
@@ -3453,7 +3532,7 @@ kmr_make_preloaded(struct link_map *m0)
     }
     int pos;
     pos = 0;
-    for (int i = 1; i < n; i++) {
+    for (int i = 1; i < (int)n; i++) {
 	struct link_map *m = scope[i];
 	if (m == m1) {
 	    pos = i;
@@ -3519,30 +3598,6 @@ kmr_restart_sparc(int isa, void *entrypoint, char **argv)
 #endif /*__sparc__*/
     (*kmr_ld_err)(DIE, "(configuration error).\n");
     abort();
-}
-
-/* Returns the size of the symbol, or returns -1 when not found.  It
-   tests the existence of the symbol by dlsym() first, because
-   _dl_lookup_symbol_x() aborts inside. */
-
-long
-kmr_ld_get_symbol_size(char *name)
-{
-    void *p = dlsym(RTLD_DEFAULT, name);
-    if (p == 0) {
-	return -1;
-    } else {
-	struct link_map *m0 = kmr_aout;
-	const Elf64_Sym *s = 0;
-	struct link_map *m = (*kmr_lookup_symbol)(name, m0, &s,
-						  m0->l_scope, 0, 0,
-						  DL_LOOKUP_ADD_DEPENDENCY, 0);
-	if (m != 0) {
-	    return (*s).st_size;
-	} else {
-	    return -1;
-	}
-    }
 }
 
 /*

@@ -1,23 +1,30 @@
 # Makefile
 
-# Compile this on a compute node; This makefile is for non-cross
-# compiling.  It needs configuration information of ld.so.  First, it
-# needs the include file settings.  Run "make.config.mk.sh" to make
-# "config.mk".  The run makes a include list from the value of
-# "config-sysdirs" in "GLIBCBUILD/config.make".  Second, it also needs
-# "config.h" and "abi-versions.h" in "GLIBCBUILD".
+# Compile this on a compute node on K.  This makefile is for non-cross
+# compiling.  Beware of tests which are cross compiled.  It needs
+# configuration information of ld.so.  First, it needs the include
+# file settings.  Run "make.config.mk.sh" to make "config.mk".  The
+# run makes a include list from the value of "config-sysdirs" in
+# "GLIBCBUILD/config.make".  Second, it also needs "config.h" and
+# "abi-versions.h" in "GLIBCBUILD".
 
 -include config.mk
 
-all: libkmrspawn.so
+GCCWARN = -Wextra -Wno-unused-parameter
+# -Wmissing-prototypes -Wshadow -Wconversion
 
-libkmrspawn.so: config.mk kmrld.c kmrhooks.c kmrspawn.c
+all: config.mk libkmrspawn.so
+
+libkmrspawn.so::
 	gcc -std=gnu99 -fPIC -O -g -fgnu89-inline -fmerge-all-constants \
 	-DPIC -D_LIBC_REENTRANT -DSHARED -DNOT_IN_libc=1 \
-	$(INCS) $(SYMS) -Wall -Wstrict-prototypes -c kmrld.c
+	-Wall -Wstrict-prototypes $(GCCWARN) $(INCS) $(SYMS) -c kmrld.c
 	mpifcc -Xg -fopenmp -mt -std=gnu99 -fPIC -DPIC -c kmrhooks.c kmrspawn.c
-	gcc -shared -Wl,-soname,libkmrspawn.so \
+	mpifcc -Xg -shared -Wl,-soname,libkmrspawn.so \
 		-o libkmrspawn.so kmrld.o kmrhooks.o kmrspawn.o
+
+# gcc -shared -Wl,-soname,libkmrspawn.so
+# -L/opt/FJSVfxlang/1.2.1/lib64 -lmpi
 
 config.mk:
 	@echo "Run make.config.mk.sh to make config.mk"; exit 1
