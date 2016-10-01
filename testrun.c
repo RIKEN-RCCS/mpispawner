@@ -111,15 +111,29 @@ main(int argc, char **argv, char **envp)
 	abort();
     }
 
-    typedef long (*getsize_t)(char *);
-    getsize_t getsize = (getsize_t)dlsym(m, "kmr_ld_get_symbol_size");
+    typedef long (*getsizefn_t)(char *);
+    getsizefn_t getsize = (getsizefn_t)dlsym(m, "kmr_ld_get_symbol_size");
     if (getsize == 0) {
 	printf("dlsym(kmr_ld_get_symbol_size): %s\n", dlerror());
 	abort();
     }
+
+    /* Check kmr_ld_get_symbol_size(). */
+
     long sz = (*getsize)("printf");
     printf("size of symbol printf=%ld\n", sz);
     fflush(0);
+
+    typedef void (*setprfn_t)(int, void (*)(int, char *, ...));
+    setprfn_t setpr = (setprfn_t)dlsym(m, "kmr_ld_set_error_printer");
+    if (setpr == 0) {
+	printf("dlsym(kmr_ld_set_error_printer): %s\n", dlerror());
+	abort();
+    }
+
+    /* Make verbose. */
+
+    (*setpr)(3, 0);
 
     char **oldargv = argv;
     char **newargv = &argv[1];

@@ -4,13 +4,15 @@
 
 /** \file kmrld.h Interface to the routines defined in "kmrld.c". */
 
-/* Severity for the error printer.  Smaller numbers are more sever. */
+/* Verbosity of the error/message printer.  Smaller numbers are more
+   sever.  The default error printer aborts at DIE.  DIN is for
+   debugging of the library.  */
 
 enum {
     DIE = 0,
-    ERR = 1,
-    WRN = 2,
-    MSG = 3
+    WRN = 1,
+    MSG = 2,
+    DIN = 3,
 };
 
 extern void kmr_ld_usoexec(char **argv, char **oldargv, long flags,

@@ -32,7 +32,7 @@
 #define RTLD_DEFAULT ((void *) 0)
 #endif
 
-/* Save area of hooks.  It is set by kmr_spawn_hookup(). */
+/* Area of record of hooks.  It is set by kmr_spawn_hookup(). */
 
 static struct kmr_spawn_hooks *kmr_spawn_hooks = 0;
 
@@ -177,7 +177,7 @@ kmr_spawn_hookup(struct kmr_spawn_hooks *hooks)
 	    (*kmr_ld_err)(DIE, "Cannot find argv from environ pointer.\n");
 	}
 
-	hooks->d.options_flag = 0x110;
+	hooks->d.options_flags = 0x110;
 	hooks->d.options_heap_bottom = 0; /*AHO*/
 
 	(*kmr_ld_err)(MSG, "Setup MPI hooks done.\n");
@@ -346,7 +346,7 @@ exit(int status)
     struct kmr_spawn_hooks *hooks = kmr_spawn_hooks;
     if (hooks != 0) {
 	hooks->s.mpi_initialized = 0;
-	kmr_spawn_service_rpc(hooks, status);
+	kmr_spawn_service(hooks, status);
 	/*NEVERHERE*/
 	abort();
     } else {
@@ -368,12 +368,14 @@ execve(const char *file, char * const *argv, char * const *envp)
 /* (HOOK) */
 
 int
-PMPI_Init(int *argc, char ***argv)
+MPI_Init(int *argc, char ***argv)
 {
+    (*kmr_ld_err)(DIN, "Hooked MPI_Init() called.\n");
     struct kmr_spawn_hooks *hooks = kmr_spawn_hooks;
     assert(kmr_spawn_hooks != 0);
     if (hooks->s.mpi_initialized) {
-	(*kmr_ld_err)(DIE, "MPI_Init but already initialized.\n");
+	(*kmr_ld_err)(DIE, ("Hooked MPI_Init() is called"
+			    " but MPI is already initialized.\n"));
 	abort();
     }
     hooks->s.mpi_initialized = 1;
@@ -383,12 +385,14 @@ PMPI_Init(int *argc, char ***argv)
 /* (HOOK) */
 
 int
-PMPI_Init_thread(int *argc, char ***argv, int required, int *provided)
+MPI_Init_thread(int *argc, char ***argv, int required, int *provided)
 {
+    (*kmr_ld_err)(DIN, "Hooked MPI_Init_thread() called.\n");
     struct kmr_spawn_hooks *hooks = kmr_spawn_hooks;
     assert(kmr_spawn_hooks != 0);
     if (hooks->s.mpi_initialized) {
-	(*kmr_ld_err)(DIE, "MPI_Init_thread but already initialized.\n");
+	(*kmr_ld_err)(DIE, ("Hooked MPI_Init_thread() is called"
+			    " but MPI is already initialized.\n"));
 	abort();
     }
     hooks->s.mpi_initialized = 1;
@@ -399,13 +403,15 @@ PMPI_Init_thread(int *argc, char ***argv, int required, int *provided)
 /* (HOOK) */
 
 int
-PMPI_Finalize(void)
+MPI_Finalize(void)
 {
+    (*kmr_ld_err)(DIN, "Hooked MPI_Finalize() called.\n");
     struct kmr_spawn_hooks *hooks = kmr_spawn_hooks;
     assert(kmr_spawn_hooks != 0);
     int cc;
     if (!hooks->s.mpi_initialized) {
-	(*kmr_ld_err)(DIE, "MPI_Finalize but not initialized.\n");
+	(*kmr_ld_err)(DIE, ("Hooked MPI_Finalize() is called"
+			    " but MPI is not initialized.\n"));
 	abort();
     }
     hooks->s.mpi_initialized = 0;
@@ -423,15 +429,16 @@ PMPI_Finalize(void)
 /* (HOOK) */
 
 int
-PMPI_Abort(MPI_Comm comm, int code)
+MPI_Abort(MPI_Comm comm, int code)
 {
+    (*kmr_ld_err)(DIN, "Hooked MPI_Abort() called.\n");
     struct kmr_spawn_hooks *hooks = kmr_spawn_hooks;
     assert(kmr_spawn_hooks != 0);
     int cc;
     if (hooks->s.abort_when_mpi_abort) {
 	kmr_spawn_true_mpi_abort(comm, code);
     } else {
-	(*kmr_ld_err)(MSG, "Ignore PMPI_Abort(error=0x%x).\n", code);
+	(*kmr_ld_err)(MSG, "Ignore MPI_Abort(error=0x%x).\n", code);
 	abort();
     }
     hooks->s.mpi_initialized = 0;
@@ -449,8 +456,9 @@ PMPI_Abort(MPI_Comm comm, int code)
 /* (HOOK) */
 
 int
-PMPI_Comm_get_parent(MPI_Comm *parent)
+MPI_Comm_get_parent(MPI_Comm *parent)
 {
+    (*kmr_ld_err)(DIN, "Hooked MPI_Comm_get_parent() called.\n");
     struct kmr_spawn_hooks *hooks = kmr_spawn_hooks;
     assert(kmr_spawn_hooks != 0);
     *parent = hooks->s.spawn_parent;

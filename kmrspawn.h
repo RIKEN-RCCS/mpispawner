@@ -110,8 +110,7 @@ struct kmr_spawn_hooks {
 
     struct {
 	char **initial_argv;
-	long options_flag;
-	//void (*options_errfn)(int, char *, ...);
+	long options_flags;
 	char *options_heap_bottom;
     } d;
 
@@ -172,7 +171,8 @@ extern int kmr_spawn_setup(struct kmr_spawn_hooks *hooks,
 			   int nsubworlds,
 			   MPI_Comm subworlds[], unsigned long colors[],
 			   size_t argssize);
-extern void kmr_spawn_service_rpc(struct kmr_spawn_hooks *hooks, int status);
+extern void kmr_spawn_service(struct kmr_spawn_hooks *hooks, int status);
+extern void kmr_spawn_set_verbosity(struct kmr_spawn_hooks *hooks, int level);
 
 /* Calling Unhooked Routines. */
 

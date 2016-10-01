@@ -157,6 +157,16 @@ kmr_spawn_setup(struct kmr_spawn_hooks *hooks,
     return MPI_SUCCESS;
 }
 
+void
+kmr_spawn_set_verbosity(struct kmr_spawn_hooks *hooks, int level)
+{
+    hooks->s.print_trace = (level >= 2);
+#if KMR_LIBKMR
+#else
+    kmr_ld_set_error_printer(level, 0);
+#endif
+}
+
 static int kmr_spawn_join_to_master(struct kmr_spawn_hooks *hooks,
 				    struct kmr_spawn_work *w, size_t msglen);
 static int kmr_spawn_clean_worker_state(struct kmr_spawn_hooks *hooks);
@@ -168,7 +178,7 @@ static int kmr_spawn_start_work(struct kmr_spawn_hooks *hooks,
    when it starts a new process. */
 
 void
-kmr_spawn_service_rpc(struct kmr_spawn_hooks *hooks, int status)
+kmr_spawn_service(struct kmr_spawn_hooks *hooks, int status)
 {
     MPI_Comm basecomm = hooks->s.base_comm;
     const int master = hooks->s.master_rank;
@@ -349,7 +359,7 @@ kmr_spawn_start_work(struct kmr_spawn_hooks *hooks,
     }
 
     hooks->s.running_work = w;
-    hooks->s.mpi_initialized = 1;
+    hooks->s.mpi_initialized = 0;
 
     if (tracing5) {
 	char aa[80];
@@ -376,7 +386,7 @@ kmr_spawn_exec_command(struct kmr_spawn_hooks *hooks, int argc, char **argv)
     return MPI_SUCCESS;
 #else
     kmr_ld_usoexec(argv, hooks->d.initial_argv,
-		   hooks->d.options_flag,
+		   hooks->d.options_flags,
 		   hooks->d.options_heap_bottom);
     return MPI_SUCCESS;
 #endif

@@ -184,15 +184,15 @@ static struct r_found_version kmr_versions_area[20];
 static char kmr_new_argv_strings[1024];
 static char *kmr_new_argv[32];
 
-/* Trace printer verbosity (kmr_ld_trace in 0..3). */
+/* Trace printer verbosity (kmr_ld_verbosity be in 0..3). */
 
-static int kmr_ld_trace = MSG;
+static int kmr_ld_verbosity = WRN;
 
-/* Prints error/warning messages. */
+/* Prints messages.  It is a default error/message printer. */
 
 static void kmr_print_errors(int err, char *format, ...);
 
-/* Error printer. */
+/* Error/message printer. */
 
 void (*kmr_ld_err)(int, char *, ...) = kmr_print_errors;
 
@@ -350,7 +350,7 @@ kmr_get_so_name(struct link_map *m)
 static void
 kmr_print_errors(int err, char *format, ...)
 {
-    if (err <= WRN || kmr_ld_trace != 0) {
+    if (err <= kmr_ld_verbosity) {
 	va_list a;
 	va_start(a, format);
 	vfprintf(stdout, format, a); fflush(0);
@@ -371,7 +371,7 @@ kmr_backtrace_on_signal(int sig, siginfo_t *i, void *x)
     sa.sa_handler = SIG_DFL;
     int cc = sigaction(sig, &sa, 0);
     if (cc == -1) {
-	(*kmr_ld_err)(MSG, "sigaction(%d, SIG_DFL) (at signal): %s.\n",
+	(*kmr_ld_err)(WRN, "sigaction(%d,SIG_DFL) (in signal handler): %s.\n",
 		      sig, strerror(errno));
     }
     void *pc[50];
@@ -567,7 +567,7 @@ kmr_mmap_segment(Elf64_Addr s, size_t len, size_t extlen,
     int cc;
 
     if (len != 0) {
-	(*kmr_ld_err)(MSG, "  mmap(%p, 0x%zx, 0x%zx).\n", s0, maplen0, mapoff);
+	(*kmr_ld_err)(DIN, "  mmap(%p, 0x%zx, 0x%zx).\n", s0, maplen0, mapoff);
 	void *m = mmap(s0, maplen0, prot, flags, fd, mapoff);
 	if (m == MAP_FAILED) {
 	    (*kmr_ld_err)(DIE, "mmap(%p, 0x%zx, 0x%zx): %s.\n",
@@ -604,7 +604,7 @@ kmr_mmap_segment(Elf64_Addr s, size_t len, size_t extlen,
 
     if (zeropage < zeroend) {
 	size_t maplen1 = (zeroend - zeropage);
-	(*kmr_ld_err)(MSG, "  mmap(%p, 0x%zx, anon).\n", zeropage, maplen1);
+	(*kmr_ld_err)(DIN, "  mmap(%p, 0x%zx, anon).\n", zeropage, maplen1);
 	void *m = mmap(zeropage, maplen1,
 		       prot, (MAP_ANON|MAP_PRIVATE|MAP_FIXED), -1, (off_t)0);
 	if (m == MAP_FAILED) {
@@ -640,7 +640,7 @@ kmr_copy_segment(Elf64_Addr s, size_t len, size_t extlen,
     }
 
     if (len != 0) {
-	(*kmr_ld_err)(MSG, "  memcpy(%p, _, 0x%zx).\n", s0, maplen);
+	(*kmr_ld_err)(DIN, "  memcpy(%p, _, 0x%zx).\n", s0, maplen);
 	memcpy(s0, (image + mapoff), maplen);
     }
 
@@ -648,7 +648,7 @@ kmr_copy_segment(Elf64_Addr s, size_t len, size_t extlen,
     size_t zerolen = (extlen - len);
 
     if (zerolen > 0) {
-	(*kmr_ld_err)(MSG, "  memset(%p, 0, 0x%zx).\n", zerostart, zerolen);
+	(*kmr_ld_err)(DIN, "  memset(%p, 0, 0x%zx).\n", zerostart, zerolen);
 	memset(zerostart, 0, zerolen);
     }
 
@@ -854,8 +854,8 @@ kmr_record_fjmpg_pages(struct link_map *m0)
 	    size_t size = kmr_ceiling_to_align(maplen, pagesize);
 
 	    if (((intptr_t)s0 & (kmr_fjmpg_alignment - 1)) == 0) {
-		(*kmr_ld_err)(MSG, "Record mpg-mapped page %p,"
-			      " size=0x%zx, prot=0x%x.\n",
+		(*kmr_ld_err)(DIN, ("Record mpg-mapped page %p,"
+				    " size=0x%zx, prot=0x%x.\n"),
 			      (void *)s0, size, prot);
 		int N = (sizeof(kmr_exec_info.fjmpg_pages)
 			 /sizeof(kmr_exec_info.fjmpg_pages[0]));
@@ -893,7 +893,7 @@ kmr_unmap_old_aout(Elf64_Addr addr, Elf64_Phdr *phdrs, int phnum)
 	    size_t len = ph->p_memsz;
 	    size_t maplen = (len + shift);
 	    if (kmr_check_pages_mappable(s, len)) {
-		(*kmr_ld_err)(MSG, "  munmap(%p, 0x%zx).\n", s0, maplen);
+		(*kmr_ld_err)(DIN, "  munmap(%p, 0x%zx).\n", s0, maplen);
 		cc = munmap(s0, maplen);
 		if (cc != 0) {
 		    (*kmr_ld_err)(DIE, "munmap(%p, 0x%zx): %s.\n",
@@ -1022,7 +1022,7 @@ kmr_load_needed_so(char *image, size_t size, struct link_map *m0)
 		    }
 #endif
 		    if (p != 0) {
-			(*kmr_ld_err)(MSG, "  %s (already loaded).\n", s);
+			(*kmr_ld_err)(DIN, "  %s (already loaded).\n", s);
 		    } else {
 			/*printf("so=%s needed.\n", s);*/
 			assert(nneeds < (int)(sizeof(needs)/sizeof(needs[0])));
@@ -1052,7 +1052,7 @@ kmr_load_needed_so(char *image, size_t size, struct link_map *m0)
     /* Load needed, and set dependency as required by a.out. */
 
     for (int i = 0; i < nneeds; i++) {
-	(*kmr_ld_err)(MSG, "  %s loading...\n", needs[i]); fflush(0);
+	(*kmr_ld_err)(DIN, "  %s loading...\n", needs[i]); fflush(0);
 	struct link_map *m = dlopen(needs[i], (RTLD_NOW|RTLD_GLOBAL));
 	if (m == 0) {
 	    (*kmr_ld_err)(DIE, "dlopen(%s): %s.\n", needs[i], dlerror());
@@ -1092,7 +1092,7 @@ kmr_change_aout_name(char ** argv, char *name)
 static void
 kmr_reset_link_map(struct link_map *m0, char *image, size_t size)
 {
-    const Elf64_Addr ADDRMAX = 0xefffffffffffffffUL;
+    const Elf64_Addr ADDRMAX = 0x7fffffffffffffffUL;
     Elf64_Ehdr *ehdr = (Elf64_Ehdr *)image;
     Elf64_Phdr *phdrs = (Elf64_Phdr *)(image + ehdr->e_phoff);
 
@@ -1227,7 +1227,7 @@ static void kmr_setup_hashtable(struct link_map *m);
 static void
 kmr_setup_link_map(struct link_map *m0, char *image, size_t size)
 {
-    const Elf64_Addr ADDRMAX = 0xefffffffffffffffUL;
+    const Elf64_Addr ADDRMAX = 0x7fffffffffffffffUL;
 
     Elf64_Ehdr *ehdr = (Elf64_Ehdr *)image;
     Elf64_Phdr *phdrs = (Elf64_Phdr *)(image + ehdr->e_phoff);
@@ -1337,7 +1337,7 @@ kmr_setup_link_map(struct link_map *m0, char *image, size_t size)
 	}
 
 	case PT_GNU_STACK:
-	    (*kmr_ld_err)(MSG, "  Ignore PT_GNU_STACK in PHDR.\n");
+	    (*kmr_ld_err)(DIN, "  Ignore PT_GNU_STACK in PHDR.\n");
 	    _rtld_global._dl_stack_flags = ph->p_flags;
 	    break;
 
@@ -1677,7 +1677,7 @@ kmr_relocate_so(int isa, struct link_map *m,
     kmr_relocation_binder = binder;
 
     if (m->l_info[DT_TEXTREL] != 0) {
-	(*kmr_ld_err)(MSG, "  Ignore DT_TEXTREL.\n");
+	(*kmr_ld_err)(DIN, "  Ignore DT_TEXTREL.\n");
     }
 
     /* [ELF_DYNAMIC_RELOCATE() in elf/dynamic-link.h] */
@@ -1825,8 +1825,8 @@ kmr_resolve_map(int isa, struct SYMMAP *ref, Elf64_Rela *r, struct link_map *m)
 	def.map = (*lookup)(name, m, &def.sym,
 			    m->l_scope, version, tc,
 			    DL_LOOKUP_ADD_DEPENDENCY, 0);
-	if (kmr_ld_trace == 3) {
-	    (*kmr_ld_err)(MSG, "  Lookup_symbol (%s) ref=%s, def=%s\n",
+	if (kmr_ld_verbosity >= DIN) {
+	    (*kmr_ld_err)(DIN, "  Lookup_symbol (%s) ref=%s, def=%s\n",
 			  name, kmr_get_so_name(m), kmr_get_so_name(def.map));
 	}
     }
@@ -2067,7 +2067,7 @@ kmr_bind_elf_x86(int isa, struct link_map *m,
 	unsigned int *addr = (void *)slot;
 	*addr = value;
 	if (value > UINT_MAX) {
-	    (*kmr_ld_err)(ERR, "Symbol '%s' causes overflow"
+	    (*kmr_ld_err)(WRN, "Symbol '%s' causes overflow"
 			  " in R_X86_64_32 relocation.\n", name);
 	}
 	break;
@@ -2080,7 +2080,7 @@ kmr_bind_elf_x86(int isa, struct link_map *m,
 	Elf64_Addr value1 = (value - (Elf64_Addr)slot);
 	*addr = value1;
 	if (value1 != (unsigned int)value1) {
-	    (*kmr_ld_err)(ERR, "Symbol '%s' causes overflow"
+	    (*kmr_ld_err)(WRN, "Symbol '%s' causes overflow"
 			  " in R_X86_64_PC32 relocation.\n", name);
 	}
 	break;
@@ -2092,12 +2092,12 @@ kmr_bind_elf_x86(int isa, struct link_map *m,
 	if (def.sym != 0) {
 	    Elf64_Addr value = kmr_get_symbol_value(&def, (Elf64_Sxword)0);
 	    if (def.sym->st_size != ref.sym->st_size) {
-		(*kmr_ld_err)(ERR, "Symbol '%s' (copy-relocation)"
+		(*kmr_ld_err)(WRN, "Symbol '%s' (copy-relocation)"
 			      " has different sizes.\n", name);
 	    }
 	    size_t sz = MIN(def.sym->st_size, ref.sym->st_size);
 	    memcpy(slot, (void *)value, sz);
-	    (*kmr_ld_err)(MSG, "  R_COPY (%s) memcpy(%p, %p, %ld).\n",
+	    (*kmr_ld_err)(DIN, "  R_COPY (%s) memcpy(%p, %p, %ld).\n",
 			  name, slot, (void *)value, sz); fflush(0);
 	}
 	break;
@@ -2266,12 +2266,12 @@ kmr_bind_elf_sparc(int isa, struct link_map *m,
 	if (def.sym != 0) {
 	    Elf64_Addr value = kmr_get_symbol_value(&def, (Elf64_Sxword)0);
 	    if (def.sym->st_size != ref.sym->st_size) {
-		(*kmr_ld_err)(ERR, "Symbol '%s' (copy-relocation)"
+		(*kmr_ld_err)(WRN, "Symbol '%s' (copy-relocation)"
 			      " has different sizes.\n", name);
 	    }
 	    size_t sz = MIN(def.sym->st_size, ref.sym->st_size);
 	    memcpy(slot, (void *)value, sz);
-	    (*kmr_ld_err)(MSG, "  R_COPY (%s) memcpy(%p, %p, %ld).\n",
+	    (*kmr_ld_err)(DIN, "  R_COPY (%s) memcpy(%p, %p, %ld).\n",
 			  name, slot, (void *)value, sz); fflush(0);
 	}
 	break;
@@ -2554,7 +2554,7 @@ kmr_find_copy_relocations(int isa, struct link_map *m,
 	    def.sym = sym1;
 	    def.map = kmr_relocation_binder;
 	}
-	(*kmr_ld_err)(MSG, "  Find R_COPY (%s) ref=%s, def=%s.\n",
+	(*kmr_ld_err)(DIN, "  Find R_COPY (%s) ref=%s, def=%s.\n",
 		      name, kmr_get_so_name(ref.map),
 		      kmr_get_so_name(def.map));
 	if (def.sym == 0) {
@@ -2572,7 +2572,7 @@ kmr_find_copy_relocations(int isa, struct link_map *m,
 	    Elf64_Addr value = kmr_get_symbol_value(&def, (Elf64_Sxword)0);
 	    size_t sz = MIN(def.sym->st_size, ref.sym->st_size);
 	    memcpy((void *)value, slot, sz);
-	    (*kmr_ld_err)(MSG, "  R_COPY (%s) memcpy(%p, %p, %ld).\n",
+	    (*kmr_ld_err)(DIN, "  R_COPY (%s) memcpy(%p, %p, %ld).\n",
 			  name, (void *)value, slot, sz); fflush(0);
 	}
     } else {
@@ -2636,7 +2636,7 @@ kmr_relocate_copy_relocation_x86(int isa, struct link_map *m,
 
     case R_X86_64_GLOB_DAT:
     case R_X86_64_JUMP_SLOT: {
-	(*kmr_ld_err)(MSG, "  Rebind R_COPY (%s) ref=%s, def=%s.\n",
+	(*kmr_ld_err)(DIN, "  Rebind R_COPY (%s) ref=%s, def=%s.\n",
 		      reloc->st_name, kmr_get_so_name(m),
 		      kmr_get_so_name(reloc->def.map));
 	Elf64_Addr pagesize = kmr_get_page_size1();
@@ -2744,7 +2744,7 @@ kmr_relocate_copy_relocation_sparc(int isa, struct link_map *m,
 
     case R_SPARC_64:
     case R_SPARC_GLOB_DAT: {
-	(*kmr_ld_err)(MSG, "  Rebind R_COPY (%s) ref=%s, def=%s.\n",
+	(*kmr_ld_err)(DIN, "  Rebind R_COPY (%s) ref=%s, def=%s.\n",
 		      reloc->st_name, kmr_get_so_name(m),
 		      kmr_get_so_name(reloc->def.map));
 	Elf64_Addr pagesize = kmr_get_page_size1();
@@ -2784,7 +2784,7 @@ kmr_relocate_copy_relocation_sparc(int isa, struct link_map *m,
 	break;
 
     case R_SPARC_JMP_SLOT: {
-	(*kmr_ld_err)(MSG, "  Rebind R_COPY (%s) ref=%s, def=%s.\n",
+	(*kmr_ld_err)(DIN, "  Rebind R_COPY (%s) ref=%s, def=%s.\n",
 		      reloc->st_name, kmr_get_so_name(m),
 		      kmr_get_so_name(reloc->def.map));
 	Elf64_Addr pagesize = kmr_get_page_size1();
@@ -3024,15 +3024,15 @@ static int kmr_make_preloaded(struct link_map *m0);
 static void kmr_restart_x86(int isa, void *entrypoint, char **argv);
 static void kmr_restart_sparc(int isa, void *entrypoint, char **argv);
 
-/* Sets the error/warning message printer.  LEVEL is 0 to 3.  PRINTER
+/* Sets the error/warning/message printer.  LEVEL is 0 to 3.  PRINTER
    can be a null. */
 
 void
 kmr_ld_set_error_printer(int level, void (*printer)(int, char *, ...))
 {
-    assert(0 <= level && level <= MSG);
+    assert(0 <= level && level <= DIN);
     kmr_ld_err = ((printer != 0) ?  printer : kmr_print_errors);
-    kmr_ld_trace = level;
+    kmr_ld_verbosity = level;
 }
 
 /* Returns the size of the symbol, or returns -1 when not found.  It
@@ -3087,8 +3087,8 @@ kmr_ld_get_symbol_size(char *name)
    only effective at the first call.  They can be zero for later
    calls.  OLDARGV is an original argv pointer which is used to
    replace the command line strings visible in core dumps.  FLAGS are
-   bits.  The 0x10 bit indicates to memcpy() the data segment instead
-   of mmap().  The 0x100 bit indicates to make this library as
+   bits.  The 0x10 bit indicates to use memcpy() the data segment
+   instead of mmap().  The 0x100 bit indicates to make this library as
    preloaded.  HEAPBOTTOM specifies the lower bound of heaps. */
 
 void
@@ -3096,12 +3096,10 @@ kmr_ld_usoexec(char **argv, char **oldargv, long flags, char *heapbottom)
 {
     int cc;
 
-    /*kmr_ld_err = ((errfn != 0) ?  errfn : kmr_print_errors);*/
-    /*kmr_ld_trace = (flags & 0x3);*/
     _Bool copy_data_segment = ((flags & 0x10) != 0);
     _Bool loader_preloaded = ((flags & 0x100) != 0);
 
-    if (kmr_ld_trace > 0) {
+    if (kmr_ld_verbosity >= WRN) {
 	int sigs[] = {SIGSEGV, SIGILL, 0};
 	kmr_install_backtrace_printer(sigs);
     }
@@ -3136,27 +3134,27 @@ kmr_ld_usoexec(char **argv, char **oldargv, long flags, char *heapbottom)
 
     /* Copy arguments in case they are in text/data. */
 
-    int argc;
+    int new_argc;
 
     {
 	int argslimit = ((sizeof(kmr_new_argv) / sizeof(kmr_new_argv[0])) - 1);
-	argc = 0;
+	new_argc = 0;
 	for (int i = 0; i < argslimit; i++) {
 	    if (argv[i] == 0) {
-		argc = i;
+		new_argc = i;
 		break;
 	    }
 	}
-	if (argc == 0) {
+	if (new_argc == 0) {
 	    (*kmr_ld_err)(DIE, "Bad argv, none or too many.\n");
 	    abort();
 	}
-	assert(argc != 0 && argc <= argslimit);
+	assert(new_argc != 0 && new_argc <= argslimit);
 
 	char *strslimit = &kmr_new_argv_strings[sizeof(kmr_new_argv_strings)];
 	char *p;
 	p = kmr_new_argv_strings;
-	for (int i = 0; i < argc; i++) {
+	for (int i = 0; i < new_argc; i++) {
 	    int n = strlen(argv[i]);
 	    if ((p + n + 1) >= strslimit) {
 		(*kmr_ld_err)(DIE, "Bad argv, strings not fit in buffer.\n");
@@ -3166,19 +3164,19 @@ kmr_ld_usoexec(char **argv, char **oldargv, long flags, char *heapbottom)
 	    kmr_new_argv[i] = p;
 	    p += (n + 1);
 	}
-	kmr_new_argv[argc] = 0;
+	kmr_new_argv[new_argc] = 0;
     }
 
     char *name = kmr_new_argv[0];
 
-    if (kmr_ld_trace == 3) {
+    if (kmr_ld_verbosity >= MSG) {
 	(*kmr_ld_err)(MSG, "Reloading: target=%s, nommap=%d, preload=%d.\n",
 		      name,
 		      kmr_exec_info.copy_data_segment,
 		      kmr_exec_info.loader_preloaded);
     }
 
-    /*if (kmr_ld_trace == 3) {kmr_dump_tls_info();}*/
+    /*if (kmr_ld_verbosity >= DIN) {kmr_dump_tls_info();}*/
 
     //(*kmr_ld_err)(MSG, "pagesize=%d.\n", kmr_get_page_size1());
     //printf("sizeof(struct link_map)=%ld\n", sizeof(struct link_map));
@@ -3221,14 +3219,14 @@ kmr_ld_usoexec(char **argv, char **oldargv, long flags, char *heapbottom)
 		}
 		off += cx;
 	    }
-	    (*kmr_ld_err)(MSG, "image(malloc)=%p.\n", image);
+	    (*kmr_ld_err)(DIN, "image(malloc)=%p.\n", image);
 	} else {
 	    image = mmap(0, size, (PROT_READ), (MAP_PRIVATE), fd, (off_t)0);
 	    if (image == MAP_FAILED) {
 		(*kmr_ld_err)(DIE, "mmap(%s): %s", name, strerror(errno));
 		abort();
 	    }
-	    (*kmr_ld_err)(MSG, "image(mmap)=%p.\n", image);
+	    (*kmr_ld_err)(DIN, "image(mmap)=%p.\n", image);
 	}
 
 	Elf64_Ehdr *ehdr = (Elf64_Ehdr *)image;
@@ -3271,7 +3269,7 @@ kmr_ld_usoexec(char **argv, char **oldargv, long flags, char *heapbottom)
     assert(m0old != 0);
     kmr_aout_map = m0old;
 
-    if (kmr_ld_trace == 3) {kmr_dump_link_maps(m0old);}
+    if (kmr_ld_verbosity >= DIN) {kmr_dump_link_maps(m0old);}
 
     kmr_check_structure_sizes_in_loaded_ldso(m0old);
 
@@ -3305,9 +3303,9 @@ kmr_ld_usoexec(char **argv, char **oldargv, long flags, char *heapbottom)
 	assert(kmr_exec_info.map_end != 0);
     }
 
-    if (kmr_ld_trace == 3) {kmr_dump_link_maps(m0old);}
+    if (kmr_ld_verbosity >= DIN) {kmr_dump_link_maps(m0old);}
 
-    /* Reset the error function, which will become unusable. */
+    /* Reset the error printer, which will become unusable. */
 
     if ((void *)kmr_ld_err < (void *)kmr_exec_info.map_end) {
 	(*kmr_ld_err)(WRN, "Reset error function; given one unusable.\n");
@@ -3358,7 +3356,7 @@ kmr_ld_usoexec(char **argv, char **oldargv, long flags, char *heapbottom)
     {
 	struct link_map *m0 = m0old;
 
-	(*kmr_ld_err)(MSG, "Put the new command name (%s).\n", name);
+	(*kmr_ld_err)(DIN, "Put the new command name (%s).\n", name);
 	kmr_change_aout_name(kmr_exec_info.old_argv, name);
 
 	/* Save the old PHDR for unmapping the old a.out. */
@@ -3396,7 +3394,7 @@ kmr_ld_usoexec(char **argv, char **oldargv, long flags, char *heapbottom)
 	m0old = 0;
     }
 
-    if (kmr_ld_trace == 3) {kmr_dump_link_maps(m0new);}
+    if (kmr_ld_verbosity >= DIN) {kmr_dump_link_maps(m0new);}
 
     if (kmr_exec_info.map_end < m0new->l_map_end) {
 	(*kmr_ld_err)(DIE,
@@ -3438,7 +3436,7 @@ kmr_ld_usoexec(char **argv, char **oldargv, long flags, char *heapbottom)
     cc = close(fd);
     assert(cc == 0);
 
-    if (kmr_ld_trace == 3) {
+    if (kmr_ld_verbosity >= MSG) {
 	(*kmr_ld_err)(MSG, "Reloaded the new executable.\n");
     }
 
@@ -3479,18 +3477,18 @@ kmr_ld_usoexec(char **argv, char **oldargv, long flags, char *heapbottom)
 	/* Layout arguments at immediately before the old ENVP. */
 
 	char **envv = kmr_exec_info.old_envv;
-	char **argvstack = &envv[-(argc + 1)];
-	for (int i = 0; i < argc; i++) {
+	char **argvstack = &envv[-(new_argc + 1)];
+	for (int i = 0; i < new_argc; i++) {
 	    argvstack[i] = kmr_new_argv[i];
 	}
-	argvstack[argc] = 0;
+	argvstack[new_argc] = 0;
 	long *iargv = (long *)argvstack;
-	iargv[-1] = argc;
+	iargv[-1] = new_argc;
 
-	if (kmr_ld_trace == 3) {
-	    printf("argc=%ld.\n", (long)argvstack[-1]);
-	    for (int i = 0; i < (argc + 1); i++) {
-		printf("argv[%d]=%s.\n", i, argvstack[i]);
+	if (kmr_ld_verbosity >= DIN) {
+	    printf("  argc=%ld\n", (long)argvstack[-1]);
+	    for (int i = 0; i < (new_argc + 1); i++) {
+		printf("  argv[%d]=%s\n", i, argvstack[i]);
 	    }
 	}
 
@@ -3577,7 +3575,10 @@ kmr_restart_x86(int isa, void *entrypoint, char **argv)
     abort();
 }
 
-/* Starts from an entry point as specified by the SYSV ABI. */
+/* Starts from an entry point as specified by the SYSV ABI.  See
+   "SYSTEM V APPLICATION BINARY INTERFACE SPARC Version 9 Processor
+   Supplement" (May 17, 1996).  "Figure 3-32: Initial Process
+   Stack". */
 
 static void
 kmr_restart_sparc(int isa, void *entrypoint, char **argv)
@@ -3593,7 +3594,7 @@ kmr_restart_sparc(int isa, void *entrypoint, char **argv)
     __asm__ __volatile__("mov %g0, %g1");
     __asm__ __volatile__("mov %g0, %fp");
     __asm__ __volatile__("jmp %l0");
-    __asm__ __volatile__("sub %sp, 64, %sp");
+    __asm__ __volatile__("nop");
     __asm__ __volatile__("illtrap 0");
 #endif /*__sparc__*/
     (*kmr_ld_err)(DIE, "(configuration error).\n");

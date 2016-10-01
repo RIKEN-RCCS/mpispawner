@@ -66,6 +66,12 @@ int
 main(int argc, char **argv, char **envp)
 {
     printf("ECHOECHO\n");
+#if 1
+    printf("argc=%d\n", argc); fflush(0);
+    for (int i = 0; i < argc; i++) {
+	printf("argv[%d]=%s\n", i, argv[i]); fflush(0);
+    }
+#endif
 
 #if 0
     extern int __libc_multiple_libcs;
