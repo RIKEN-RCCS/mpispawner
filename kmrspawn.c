@@ -73,10 +73,10 @@ static int kmr_spawn_exec_command(struct kmr_spawn_hooks *hooks,
 /* Records the parameters to spawning.  It registers an exec-function,
    subworld communicators, and their colors.  EXECFN is called at
    starting a work-item.  A communicator in SUBWORLDS will be selected
-   as a world of spawning.  A color in COLORS is passed to check the
+   as a world for spawning.  A color in COLORS is passed to check the
    correspondence of the subworld at spawning.  ARGSSIZE is the limit
-   of the argv string size in RPC messages.  It needs to set the MR
-   field in the HOOKS before calling this.  */
+   of the size of the argv strings in RPC messages.  It needs to set
+   the MR field in the HOOKS before calling this.  */
 
 int
 kmr_spawn_setup(struct kmr_spawn_hooks *hooks,
@@ -173,9 +173,12 @@ static int kmr_spawn_clean_worker_state(struct kmr_spawn_hooks *hooks);
 static int kmr_spawn_start_work(struct kmr_spawn_hooks *hooks,
 				struct kmr_spawn_work *w, size_t msglen);
 
-/* Waits for a work request from a master and handles it.  It idles
+/* Waits for a work request from the master and handles it.  It idles
    forever by receiving a message.  Furthermore, it never returns,
-   when it starts a new process. */
+   when it starts a new executable.  Thus, it is normally entered to
+   resume the service instead of looping inside.  It should be called
+   with (hooks->s.service_count=0) at the very first time, which
+   causes to send a joining message to the master. */
 
 void
 kmr_spawn_service(struct kmr_spawn_hooks *hooks, int status)
@@ -193,7 +196,8 @@ kmr_spawn_service(struct kmr_spawn_hooks *hooks, int status)
     cc = kmr_spawn_clean_worker_state(hooks);
     assert(cc == MPI_SUCCESS);
 
-    hooks->s.service_count = 0;
+    int exitstatus;
+    exitstatus = status;
 
     for (;;) {
 	{
@@ -202,7 +206,7 @@ kmr_spawn_service(struct kmr_spawn_hooks *hooks, int status)
 	    mbuf->req = KMR_SPAWN_NEXT;
 	    mbuf->protocol_version = KMR_SPAWN_MAGIC;
 	    mbuf->initial_message = (hooks->s.service_count == 0);
-	    mbuf->status = status;
+	    mbuf->status = exitstatus;
 	    int msz = (int)sizeof(struct kmr_spawn_next);
 	    cc = kmr_spawn_mpi_send(mbuf, msz, kmr_mpi_byte, master,
 				    KMR_SPAWN_RPC_TAG, basecomm);
@@ -260,8 +264,10 @@ kmr_spawn_service(struct kmr_spawn_hooks *hooks, int status)
 		memcpy(w, w0, msglen);
 		cc = kmr_spawn_join_to_master(hooks, w, msglen);
 		assert(cc == MPI_SUCCESS);
-		cc = kmr_spawn_start_work(hooks, w, msglen);
-		assert(cc == MPI_SUCCESS);
+		exitstatus = kmr_spawn_start_work(hooks, w, msglen);
+
+		/* (NEVER RETURNS WHEN EXECED). */
+
 		cc = kmr_spawn_clean_worker_state(hooks);
 		assert(cc == MPI_SUCCESS);
 		continue;
@@ -370,13 +376,13 @@ kmr_spawn_start_work(struct kmr_spawn_hooks *hooks,
     }
 
     assert(hooks->s.exec_fn != 0);
-    (*hooks->s.exec_fn)(hooks, argc, argv);
+    int exitstatus = (*hooks->s.exec_fn)(hooks, argc, argv);
     /* (NEVER RETURNS WHEN EXECED). */
 
     hooks->s.running_work = 0;
     hooks->s.mpi_initialized = 0;
 
-    return MPI_SUCCESS;
+    return exitstatus;
 }
 
 static int

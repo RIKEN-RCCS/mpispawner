@@ -186,6 +186,18 @@ kmr_spawn_hookup(struct kmr_spawn_hooks *hooks)
     }
 }
 
+/* Sets the world communicator.  It stores the structure of
+   communicator with a given one. */
+
+static int
+kmr_spawn_set_world(struct kmr_spawn_hooks *hooks, MPI_Comm comm)
+{
+    assert(hooks != 0);
+    size_t sz = hooks->h.data_size_of_comm;
+    memcpy(hooks->h.mpi_world, comm, sz);
+    return MPI_SUCCESS;
+}
+
 int
 kmr_spawn_mpi_comm_size(MPI_Comm comm, int *size)
 {
@@ -324,6 +336,7 @@ kmr_spawn_true_mpi_finalize(void)
 {
     struct kmr_spawn_hooks *hooks = kmr_spawn_hooks;
     assert(kmr_spawn_hooks != 0);
+    kmr_spawn_set_world(hooks, (MPI_Comm)hooks->h.old_world);
     int cc = (*hooks->h.PMPI_Finalize)();
     return cc;
 }
@@ -379,6 +392,7 @@ MPI_Init(int *argc, char ***argv)
 	abort();
     }
     hooks->s.mpi_initialized = 1;
+    kmr_spawn_set_world(hooks, hooks->s.spawn_world);
     return MPI_SUCCESS;
 }
 
@@ -396,6 +410,7 @@ MPI_Init_thread(int *argc, char ***argv, int required, int *provided)
 	abort();
     }
     hooks->s.mpi_initialized = 1;
+    kmr_spawn_set_world(hooks, hooks->s.spawn_world);
     int	cc = (*hooks->h.PMPI_Query_thread)(provided);
     return cc;
 }

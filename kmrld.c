@@ -144,7 +144,15 @@ typedef struct link_map *(*kmr_lookupfn_t)(const char *,
 					   int, int,
 					   struct link_map *);
 
-/* Information of the initial executable. */
+/* Information of the initial executable.  It is set once at the first
+   call to kmr_ld_usoexec().  MAP_END points to the end of data/bss.
+   TLS_OFFSET and TLS_SIZE are the TLS record in the old a.out.
+   OLD_ARGV and OLD_ENVV are the record of the argv.  OLD_ARGS and
+   OLD_ARGS_SIZE are the area of the argv strings.  The slots
+   HEAP_BOTTOM, COPY_DATA_SEGMENT, and LOADER_PRELOADED are the
+   options passed to kmr_ld_usoexec().  FJMPG_PAGES records the pages
+   of MPG mapping.  They are recorded because they disallow
+   remapping. */
 
 static struct {
     Elf64_Addr map_end;
@@ -152,9 +160,16 @@ static struct {
     size_t tls_size;
     char **old_argv;
     char **old_envv;
+    char *old_args;
+    size_t old_args_size;
 
+    /* Options passed to kmr_ld_usoexec(). */
+
+    char *heap_bottom;
     _Bool copy_data_segment;
     _Bool loader_preloaded;
+
+    /* Page mapping information (specific to K/FX10/FX100). */
 
     int n_fjmpg_pages;
     struct {
@@ -1066,15 +1081,22 @@ kmr_load_needed_so(char *image, size_t size, struct link_map *m0)
 /* Changes the a.out name in a core-dump.  Core dumper takes the name
    from the user space at the argv[0].  It sets argv[0] with the name,
    and filling the remaining space with a blank character.  The name
-   length is limited to the original argv size.  NOTE:
+   length is limited to the original argv size.  The arguments are
+   argv[0] (ARGS) and the size (SZ) of the argv strings. NOTE:
    prctl(PR_SET_NAME) nor setproctitle() does not work. */
 
 static void
-kmr_change_aout_name(char ** argv, char *name)
+kmr_change_aout_name(char *args, size_t sz, char *name)
 {
-    char *args = argv[0];
-    char *arge = (char *)environ[0];
-    size_t sz = (size_t)(arge - args);
+    //char *args = argv[0];
+    //char *arge = envv[0];
+    //size_t sz = (size_t)(arge - args);
+
+    if (sz > (size_t)((256 * 1024) * 4)) {
+	/* The area for argv is strangely too large. */
+	(*kmr_ld_err)(DIE, "Area for argv is strange: (start=%p size=%p).\n",
+		      args, sz);
+    }
 
     memset(args, 0, sz);
     snprintf(args, sz, name);
@@ -3083,9 +3105,9 @@ kmr_ld_get_symbol_size(char *name)
 }
 
 /* Restart a new a.out with an ARGV vector.  It is like execve() but
-   "path" is argv[0] and "envp" is implicit.  The other arguments are
-   only effective at the first call.  They can be zero for later
-   calls.  OLDARGV is an original argv pointer which is used to
+   "path" is argv[0] and "envp" is implicit.  The arguments except
+   ARGV are only effective at the first call.  They can be zero for
+   later calls.  OLDARGV is an original argv pointer which is used to
    replace the command line strings visible in core dumps.  FLAGS are
    bits.  The 0x10 bit indicates to use memcpy() the data segment
    instead of mmap().  The 0x100 bit indicates to make this library as
@@ -3096,18 +3118,40 @@ kmr_ld_usoexec(char **argv, char **oldargv, long flags, char *heapbottom)
 {
     int cc;
 
-    _Bool copy_data_segment = ((flags & 0x10) != 0);
-    _Bool loader_preloaded = ((flags & 0x100) != 0);
+    if (kmr_exec_info.map_end == 0) {
+	/* Do it once. */
+
+	int oldargc = (long)oldargv[-1];
+	if (oldargv[oldargc] != 0) {
+	    (*kmr_ld_err)(DIE, "Bad format in old argv (argv=%p).\n",
+			  oldargv);
+	    abort();
+	}
+	char **oldenvv = &oldargv[oldargc + 1];
+	if (oldenvv != environ) {
+	    (*kmr_ld_err)(DIE,
+			  ("Bad format in old argv, mismatch with environ"
+			   " (argv=%p, envv=%p, environ=%p).\n"),
+			  oldargv, oldenvv, environ);
+	    abort();
+	}
+
+	kmr_exec_info.old_argv = oldargv;
+	kmr_exec_info.old_envv = oldenvv;
+	kmr_exec_info.old_args = oldargv[0];
+	kmr_exec_info.old_args_size = (oldenvv[0] - oldargv[0]);
+
+	kmr_exec_info.heap_bottom = heapbottom;
+
+	_Bool copy_data_segment = ((flags & 0x10) != 0);
+	_Bool loader_preloaded = ((flags & 0x100) != 0);
+	kmr_exec_info.copy_data_segment = copy_data_segment;
+	kmr_exec_info.loader_preloaded = loader_preloaded;
+    }
 
     if (kmr_ld_verbosity >= WRN) {
 	int sigs[] = {SIGSEGV, SIGILL, 0};
 	kmr_install_backtrace_printer(sigs);
-    }
-
-    int oldargc = (long)oldargv[-1];
-    if (oldargv[oldargc] != 0) {
-	(*kmr_ld_err)(DIE, "Bad format in old argv.\n");
-	abort();
     }
 
     /* Check the ISA of the running machine. */
@@ -3170,7 +3214,7 @@ kmr_ld_usoexec(char **argv, char **oldargv, long flags, char *heapbottom)
     char *name = kmr_new_argv[0];
 
     if (kmr_ld_verbosity >= MSG) {
-	(*kmr_ld_err)(MSG, "Reloading: target=%s, nommap=%d, preload=%d.\n",
+	(*kmr_ld_err)(MSG, "Reload: executable=%s, nommap=%d, preload=%d.\n",
 		      name,
 		      kmr_exec_info.copy_data_segment,
 		      kmr_exec_info.loader_preloaded);
@@ -3281,16 +3325,13 @@ kmr_ld_usoexec(char **argv, char **oldargv, long flags, char *heapbottom)
 
     if (kmr_exec_info.map_end == 0) {
 	/* Do it once. */
-	kmr_exec_info.map_end = MAX(m0old->l_map_end, (Elf64_Addr)heapbottom);
+
+	kmr_exec_info.map_end = MAX(m0old->l_map_end,
+				    (Elf64_Addr)kmr_exec_info.heap_bottom);
 	assert(kmr_exec_info.map_end != 0);
+
 	kmr_exec_info.tls_offset = m0old->l_tls_offset;
 	kmr_exec_info.tls_size = m0old->l_tls_blocksize;
-
-	kmr_exec_info.old_argv = oldargv;
-	kmr_exec_info.old_envv = &oldargv[oldargc + 1];
-	kmr_exec_info.copy_data_segment = copy_data_segment;
-	kmr_exec_info.loader_preloaded = loader_preloaded;
-
 	if (kmr_exec_info.copy_data_segment) {
 	    kmr_record_fjmpg_pages(m0old);
 	}
@@ -3308,7 +3349,7 @@ kmr_ld_usoexec(char **argv, char **oldargv, long flags, char *heapbottom)
     /* Reset the error printer, which will become unusable. */
 
     if ((void *)kmr_ld_err < (void *)kmr_exec_info.map_end) {
-	(*kmr_ld_err)(WRN, "Reset error function; given one unusable.\n");
+	(*kmr_ld_err)(WRN, "Reset the error function; given one unusable.\n");
 	kmr_ld_err = kmr_print_errors;
     }
 
@@ -3357,7 +3398,9 @@ kmr_ld_usoexec(char **argv, char **oldargv, long flags, char *heapbottom)
 	struct link_map *m0 = m0old;
 
 	(*kmr_ld_err)(DIN, "Put the new command name (%s).\n", name);
-	kmr_change_aout_name(kmr_exec_info.old_argv, name);
+	kmr_change_aout_name(kmr_exec_info.old_args,
+			     kmr_exec_info.old_args_size,
+			     name);
 
 	/* Save the old PHDR for unmapping the old a.out. */
 
@@ -3452,7 +3495,7 @@ kmr_ld_usoexec(char **argv, char **oldargv, long flags, char *heapbottom)
 	    (*kmr_ld_err)(WRN, "pthread_sigmask(): %s", strerror(cc));
 	}
 
-#if 0 /*GOMI?*/
+#if 0 /*GOMI*/
 	if (kmr_exec_info.loader_preloaded) {
 	    void (*fn)(void) = (void (*)(void))dlsym(RTLD_DEFAULT,
 						     "kmr_ld_setup_hooks");
