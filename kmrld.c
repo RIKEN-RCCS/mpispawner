@@ -4,32 +4,33 @@
 
 /** \file kmrld.c Reloader of an Executable (in a live process).  It
     reloads a new executable a.out as if it is execed.  The main entry
-    is kmr_ld_usoexec() (User Space Exec).  It should be loaded as a
+    is kmr_ld_usoexec() (User Space O'Exec).  It should be loaded as a
     shared library.  Its motivation is to run MPI a.outs with keeping
     the state of communication (instead of using mpi_comm_spawn()).
-    It depends on and includes a part of a copy of ld.so.\n This in
-    part uses the GNU C Library (glibc-2.12.2); See the license at the
-    end of the file.
+    It depends on and includes a part of a copy of ld.so. This in part
+    uses the GNU C Library (glibc-2.12.2); See the license at the end
+    of the file.
 
-    LIMITATIONS: It has many limitations due to its hacking nature.  It
-    requires the libraries (libc and libmpi at least) are shared
-    libraries.  (1) The space of text+data+bss and the space of the TLS
-    of the new a.out should not be larger than the old.  The use of
-    large pages should agree with the old and the new a.outs on K.  (2)
-    It fails on registered call-back functions.  Especially, it cannot
-    reset the list of atexit() functions.  (3) This library should be
-    linked via dlopen() with immediate binding, and should not via
-    direct linking with lazy binding.  Lazy binding fails after
-    unmapping the old a.out.  (4) Text is maped (bypassing libc hooks)
-    and it likely cannot be used in MPI communication on K.
+    LIMITATIONS: It has many limitations due to its hacking nature.
+    It requires the libraries (libc and libmpi at least) are shared
+    libraries.  (1) The space of text+data+bss and the space of TLS of
+    the new a.out should not be larger than the old.  The use of large
+    pages should agree with the old and the new a.outs on K.  (2) It
+    fails on registered call-back functions by atexit().  Especially,
+    it cannot reset the list of atexit() functions.  (3) This library
+    should be linked via dlopen() with immediate binding, and should
+    not via direct linking with lazy binding.  Lazy binding causes
+    failures after unmapping the old a.out.  (4) Text is mapped
+    (bypassing libc hooks) and it likely cannot be used in MPI
+    communication.
 
-    NOTE: (1) It works only x86-64 and sparc-v9.  (2) It assumes the
-    handles returned dlopen are the pointers of link-maps entires.  (3)
-    It needs the actual/full definition of the link-map structure used
-    in ld.so.  (3) Defining "-DIS_IN_rtld=1" makes "_rtld_global_ro"
-    read-write, but hides some libc functions.  (4) It does not allow
-    the different data sizes in copy-relocatations whereas ld.so
-    allows.
+    NOTE: (1) It works only X86-64 and SPARC-V9.  (2) It assumes the
+    handles returned dlopen() are the pointers of link-maps entries.
+    (3) It needs the actual/full definition of the link-map structure
+    used in ld.so.  (3) Do not define "-DIS_IN_rtld=1" in compiling
+    this, because it makes "_rtld_global_ro" read-write, but hides
+    some libc functions.  (4) It does not allow the different data
+    sizes in copy-relocations whereas ld.so allows.
 
     INSTALLATION: (1) It needs the glibc source code matching the exact
     version of ld.so which is configured properly.  It also needs the
@@ -147,19 +148,19 @@ typedef struct link_map *(*kmr_lookupfn_t)(const char *,
 /* Information of the initial executable.  It is set once at the first
    call to kmr_ld_usoexec().  MAP_END points to the end of data/bss.
    TLS_OFFSET and TLS_SIZE are the TLS record in the old a.out.
-   OLD_ARGV and OLD_ENVV are the record of the argv.  OLD_ARGS and
-   OLD_ARGS_SIZE are the area of the argv strings.  The slots
-   HEAP_BOTTOM, COPY_DATA_SEGMENT, and LOADER_PRELOADED are the
-   options passed to kmr_ld_usoexec().  FJMPG_PAGES records the pages
-   of MPG mapping.  They are recorded because they disallow
-   remapping. */
+   OLD_ARGV is the record of the argv.  The OLD_ARGV is used to make a
+   new argv.  OLD_ARGS with its size OLD_ARGS_SIZE is the area of the
+   argv strings.  The area of OLD_ARGS is used to set the a.out name
+   in core dumps.  The slots HEAP_BOTTOM, COPY_DATA_SEGMENT, and
+   LOADER_PRELOADED are the options passed to kmr_ld_usoexec().
+   FJMPG_PAGES records the pages of MPG mapping.  They are recorded
+   because they disallow remapping. */
 
 static struct {
     Elf64_Addr map_end;
     ptrdiff_t tls_offset;
     size_t tls_size;
     char **old_argv;
-    char **old_envv;
     char *old_args;
     size_t old_args_size;
 
@@ -3105,13 +3106,19 @@ kmr_ld_get_symbol_size(char *name)
 }
 
 /* Restart a new a.out with an ARGV vector.  It is like execve() but
-   "path" is argv[0] and "envp" is implicit.  The arguments except
-   ARGV are only effective at the first call.  They can be zero for
-   later calls.  OLDARGV is an original argv pointer which is used to
-   replace the command line strings visible in core dumps.  FLAGS are
-   bits.  The 0x10 bit indicates to use memcpy() the data segment
-   instead of mmap().  The 0x100 bit indicates to make this library as
-   preloaded.  HEAPBOTTOM specifies the lower bound of heaps. */
+   "path" is argv[0] and "envp" is implicit.  The arguments except for
+   ARGV are only effective at the first call.  They are ignored and
+   may be zeros for later calls.  OLDARGV is an original argv pointer
+   which is used to replace the command name strings visible in core
+   dumps.  FLAGS are combination of bits.  The 0x10 bit indicates to
+   copy the data segment by memcpy() instead of mmap().  The 0x100 bit
+   indicates to make this library as preloaded.  HEAPBOTTOM specifies
+   the lower bound of heaps.  It does NOT clean process status, which
+   normally done jointly by execve() and exit(); The caller is
+   responsible for closing file descriptors, releasing mapped memory,
+   shared-memory and semaphores, etc., and restoring the various
+   control status of a process.  It cannot reclaim malloced memory,
+   and it may be considered to use Boehm GC. */
 
 void
 kmr_ld_usoexec(char **argv, char **oldargv, long flags, char *heapbottom)
@@ -3119,25 +3126,19 @@ kmr_ld_usoexec(char **argv, char **oldargv, long flags, char *heapbottom)
     int cc;
 
     if (kmr_exec_info.map_end == 0) {
-	/* Do it once. */
+	/* It is executed once. */
 
 	int oldargc = (long)oldargv[-1];
 	if (oldargv[oldargc] != 0) {
-	    (*kmr_ld_err)(DIE, "Bad format in old argv (argv=%p).\n",
-			  oldargv);
+	    (*kmr_ld_err)(DIE,
+			  ("Bad format in old argv argv=%p;"
+			   " argv[argc]=%d should be 0.\n"),
+			  oldargv, oldargv[oldargc]);
 	    abort();
 	}
 	char **oldenvv = &oldargv[oldargc + 1];
-	if (oldenvv != environ) {
-	    (*kmr_ld_err)(DIE,
-			  ("Bad format in old argv, mismatch with environ"
-			   " (argv=%p, envv=%p, environ=%p).\n"),
-			  oldargv, oldenvv, environ);
-	    abort();
-	}
 
 	kmr_exec_info.old_argv = oldargv;
-	kmr_exec_info.old_envv = oldenvv;
 	kmr_exec_info.old_args = oldargv[0];
 	kmr_exec_info.old_args_size = (oldenvv[0] - oldargv[0]);
 
@@ -3324,7 +3325,7 @@ kmr_ld_usoexec(char **argv, char **oldargv, long flags, char *heapbottom)
     /* Save settings of the initial call. */
 
     if (kmr_exec_info.map_end == 0) {
-	/* Do it once. */
+	/* It is executed once. */
 
 	kmr_exec_info.map_end = MAX(m0old->l_map_end,
 				    (Elf64_Addr)kmr_exec_info.heap_bottom);
@@ -3485,8 +3486,8 @@ kmr_ld_usoexec(char **argv, char **oldargv, long flags, char *heapbottom)
 
     assert(kmr_aout_map == m0new);
 
-    /* Set up for the new a.out (unblock blocked signals, close files,
-       and maybe run Boehm GC to reclaim unfreed memory. */
+    /* Set up for the new a.out at the last moment.  It unblocks
+       blocked signals. */
 
     {
 	/*(sigprocmask)*/
@@ -3495,15 +3496,15 @@ kmr_ld_usoexec(char **argv, char **oldargv, long flags, char *heapbottom)
 	    (*kmr_ld_err)(WRN, "pthread_sigmask(): %s", strerror(cc));
 	}
 
-#if 0 /*GOMI*/
-	if (kmr_exec_info.loader_preloaded) {
+	/* Run a call-back for some fixing (disabled). */
+
+	if (0) {
 	    void (*fn)(void) = (void (*)(void))dlsym(RTLD_DEFAULT,
-						     "kmr_ld_setup_hooks");
+						     "kmr_ld_fixup");
 	    if (fn != 0) {
 		(*fn)();
 	    }
 	}
-#endif
     }
 
     /* Prepare arguments, and then start. */
@@ -3517,10 +3518,13 @@ kmr_ld_usoexec(char **argv, char **oldargv, long flags, char *heapbottom)
 	volatile char *sp = s;
 	assert(((char *)kmr_exec_info.old_argv - sp) > 100);
 
-	/* Layout arguments at immediately before the old ENVP. */
+	/* Layout arguments at the old ARGV. */
 
+#if 0
 	char **envv = kmr_exec_info.old_envv;
 	char **argvstack = &envv[-(new_argc + 1)];
+#endif
+	char **argvstack = kmr_exec_info.old_argv;
 	for (int i = 0; i < new_argc; i++) {
 	    argvstack[i] = kmr_new_argv[i];
 	}

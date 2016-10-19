@@ -21,7 +21,7 @@ libkmrspawn.so::
 	-Wall -Wstrict-prototypes $(GCCWARN) $(INCS) $(SYMS) -c kmrld.c
 	mpifcc -Xg -fopenmp -mt -std=gnu99 -fPIC -DPIC -c kmrhooks.c kmrspawn.c
 	mpifcc -Xg -shared -Wl,-soname,libkmrspawn.so \
-		-o libkmrspawn.so kmrld.o kmrhooks.o kmrspawn.o
+		-o libkmrspawn.so kmrld.o kmrspawn.o kmrhooks.o
 
 # gcc -shared -Wl,-soname,libkmrspawn.so
 # -L/opt/FJSVfxlang/1.2.1/lib64 -lmpi

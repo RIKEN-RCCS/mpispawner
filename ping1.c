@@ -1,5 +1,7 @@
 /* ping1.c (2016-06-28) */
 
+/* Simple Test.  See "ping0.c". */
+
 #include <mpi.h>
 #include <mpi-ext.h>
 #include <stdio.h>
@@ -27,7 +29,7 @@ main(int argc, char **argv)
     MPI_Comm_size(MPI_COMM_WORLD, &nprocs);
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
 
-    printf("ping1 rank=%d/%d\n", rank, nprocs); fflush(0);
+    printf("PING1 rank=%d/%d\n", rank, nprocs); fflush(0);
 
     int n1 = 1000;
     long *data1 = malloc(sizeof(long) * n1);
@@ -60,6 +62,8 @@ main(int argc, char **argv)
     printf("PING1 rank=%d OK\n", rank, nprocs); fflush(0);
     MPI_Finalize();
 
-    exit(0);
+    /* Use _exit() because exit() is hooked. */
+
+    _exit(0);
     return 0;
 }

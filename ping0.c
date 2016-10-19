@@ -1,5 +1,10 @@
 /* ping0.c (2016-06-28) */
 
+/* Simple Test.  USAGE: mpiexec -n 2 ./ping0 ./ping1.  It starts with
+   ping0 on both rank0 and rank1, then switches to ping1 on rank1.  It
+   does not finish MPI properly, because MPI_Finalize() is hooked by a
+   null operation. */
+
 #include <mpi.h>
 #include <mpi-ext.h>
 #include <stdio.h>
@@ -46,6 +51,17 @@ main(int argc, char **argv)
 	abort();
     }
 
+    typedef int (*hookupfn_t)(void *);
+    hookupfn_t hookup = (hookupfn_t)dlsym(m, "kmr_spawn_hookup");
+    if (hookup == 0) {
+	fprintf(stderr, "dlsym(kmr_spawn_hookup): %s\n", dlerror());
+	abort();
+    }
+    char *hooks = malloc(1024);
+    assert(hooks != 0);
+    (*hookup)(hooks);
+
+#if 0 /*GOMI*/
     if (0) {
 	char **oldargv = argv;
 	char **newargv = &argv[1];
@@ -54,6 +70,7 @@ main(int argc, char **argv)
 	printf("USOEXEC RETURNS\n"); fflush(0);
 	abort();
     }
+#endif
 
     int nprocs, rank;
 
@@ -136,8 +153,8 @@ main(int argc, char **argv)
     if (rank == 0) {
 	char **oldargv = argv;
 	char **newargv = &argv[1];
-	(*usoexec)(newargv, oldargv, 0x110, 0, 0);
-	printf("USOEXEC RETURNS\n"); fflush(0);
+	(*usoexec)(newargv, oldargv, 0x110, 0);
+	printf("BAD! USOEXEC RETURNS\n"); fflush(0);
 	abort();
     }
 

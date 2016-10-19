@@ -6,13 +6,18 @@
     source code ("kmrwfmap.c") for the use of this library
     (https://github.com/pf-aics-riken/kmr).  The shared-object that
     containing this file works as if it is a preloaded library, where
-    its position in the libraries is moved before reloading a new
-    executable.  ASSUMPTIONS: (1) The MPI_COMM_WORLD in Open-MPI is an
-    address of a staticly allocated structure "ompi_mpi_comm_world"
-    (i.e., in the bss/data section).  This library replaces the
-    contents of "ompi_mpi_comm_world" with another communicator, and
-    thus, it assumes it is not referenced inside the MPI library
-    (otherwise, confuses the true world). */
+    its position in the record of libraries in ld.so is moved in
+    advance to reloading a new executable.  ASSUMPTIONS: (1) The
+    MPI_COMM_WORLD (in Open-MPI) is an address of a statically
+    allocated structure "ompi_mpi_comm_world" (in the data/bss
+    section).  This library replaces the contents of
+    "ompi_mpi_comm_world" with another communicator.  It assumes the
+    internals of the MPI library sees the content but not the pointer.
+    (2) As MPI_COMM_WORLD, there are MPI constants such as MPI_BYTE
+    and MPI_COMM_NULL that are statically allocated.  They will move
+    while dynamic linking (with a copy relocation).  It assumes the
+    internals of the MPI library does not record the pointers to them.
+    Otherwise, it confuses the MPI. */
 
 #include <mpi.h>
 #include <stdio.h>
@@ -42,7 +47,8 @@ static int kmr_spawn_mpi_comm_get_name(MPI_Comm comm, char *name, int *len);
    WORLD of MPI.  It assumes the initial argv vector is not modified.
    Note "_exit(2)" is not hooked.  It stores the passed HOOKS pointer
    for later use in the hooks.  The area of HOOKS should be in the
-   heap. */
+   heap.  Note that the world reference is not saved here and will be
+   waited until the executable is linked. */
 
 int
 kmr_spawn_hookup(struct kmr_spawn_hooks *hooks)
@@ -74,22 +80,25 @@ kmr_spawn_hookup(struct kmr_spawn_hooks *hooks)
     } else {
 	(*kmr_ld_err)(MSG, "Setup MPI hooks...\n");
 
-	hooks->h.data_size_of_comm = sz;
-	hooks->h.mpi_world = wp;
-	hooks->h.old_world = malloc(sz);
-	if (hooks->h.old_world == 0) {
+	hooks->h.size_of_comm_data = sz;
+	hooks->h.saved_genuine_world = malloc(sz);
+	if (hooks->h.saved_genuine_world == 0) {
 	    (*kmr_ld_err)(DIE, "malloc(comm): %s.\n", strerror(errno));
 	}
-	memcpy(hooks->h.old_world, hooks->h.mpi_world, sz);
+	memcpy(hooks->h.saved_genuine_world, wp, sz);
 
 #define DEFSYM(FN) hooks->h.FN = (intfn_t)dlsym(RTLD_NEXT, #FN)
 
-	/*hooks->_exit = (voidfn_t)dlsym(RTLD_NEXT, "_exit");*/
-	hooks->h.exit = (voidfn_t)dlsym(RTLD_NEXT, "exit");
-	hooks->h.execve = (intfn_t)dlsym(RTLD_NEXT, "execve");
-
+	hooks->h.mpi_comm_world = wp;
 	hooks->h.mpi_byte = dlsym(RTLD_DEFAULT, "ompi_mpi_byte");
 	hooks->h.mpi_comm_null = dlsym(RTLD_DEFAULT, "ompi_mpi_comm_null");
+	assert(hooks->h.mpi_comm_world != 0);
+	assert(hooks->h.mpi_byte != 0);
+	assert(hooks->h.mpi_comm_null != 0);
+
+	hooks->h.exit = (voidfn_t)dlsym(RTLD_NEXT, "exit");
+	hooks->h.raw_exit = (voidfn_t)dlsym(RTLD_NEXT, "_exit");
+	hooks->h.execve = (intfn_t)dlsym(RTLD_NEXT, "execve");
 
 	DEFSYM(PMPI_Init);
 	DEFSYM(PMPI_Init_thread);
@@ -117,6 +126,7 @@ kmr_spawn_hookup(struct kmr_spawn_hooks *hooks)
 	    (*kmr_ld_err)(WRN, "libc seems not linked.\n");
 	} else {
 	    assert(hooks->h.exit != 0);
+	    assert(hooks->h.raw_exit != 0);
 	    assert(hooks->h.execve != 0);
 	}
 
@@ -125,9 +135,6 @@ kmr_spawn_hookup(struct kmr_spawn_hooks *hooks)
 	}
 
 	{
-	    assert(hooks->h.mpi_byte != 0);
-	    assert(hooks->h.mpi_comm_null != 0);
-
 	    assert(hooks->h.PMPI_Init != 0);
 	    assert(hooks->h.PMPI_Init_thread != 0);
 	    assert(hooks->h.PMPI_Finalize != 0);
@@ -149,36 +156,52 @@ kmr_spawn_hookup(struct kmr_spawn_hooks *hooks)
 	    assert(hooks->h.PMPI_Get_count != 0);
 	}
 
-	MPI_Comm comm = hooks->h.mpi_world;
+	MPI_Comm comm = wp;
 	int namelen;
 	cc = kmr_spawn_mpi_comm_get_name(comm, hooks->h.world_name,
 					 &namelen);
 	assert(cc == MPI_SUCCESS);
 
-	/* Find argv pointer from environ (it assumes argc<200). */
+	/* Set loader state. */
 
 	{
-	    extern char **environ;
-	    char **oargv;
-	    oargv = 0;
-	    if (((long)environ[-1]) == 0) {
-		for (int i = 0; i < 200; i++) {
-		    long argc = (long)environ[-i - 2];
-		    if (argc == i) {
-			oargv = &environ[-i - 2 + 1];
-			break;
+	    /* Find argv pointer from "environ" (it assumes argc<200). */
+
+	    {
+		extern char **environ;
+		char **oargv;
+		oargv = 0;
+		if (((long)environ[-1]) == 0) {
+		    for (int i = 0; i < 200; i++) {
+			long argc = (long)environ[-i - 2];
+			if (argc == i) {
+			    oargv = &environ[-i - 2 + 1];
+			    break;
+			}
 		    }
 		}
+		hooks->d.initial_argv = oargv;
 	    }
-	    hooks->d.initial_argv = oargv;
+
+	    if (hooks->d.initial_argv == 0) {
+		(*kmr_ld_err)(DIE, "Cannot find argv from environ pointer.\n");
+	    }
+
+	    hooks->d.options_flags = 0x110;
+	    hooks->d.options_heap_bottom = 0; /*AHO*/
 	}
 
-	if (hooks->d.initial_argv == 0) {
-	    (*kmr_ld_err)(DIE, "Cannot find argv from environ pointer.\n");
-	}
+	/* (Set MPI state; Set them here for tests). */
 
-	hooks->d.options_flags = 0x110;
-	hooks->d.options_heap_bottom = 0; /*AHO*/
+	if (1) {
+	    //hooks->s.spawn_world = hooks->h.mpi_comm_null;
+	    //hooks->s.spawn_parent = hooks->h.mpi_comm_null;
+	    hooks->s.spawn_world = 0;
+	    hooks->s.spawn_parent = 0;
+	    hooks->s.running_work = 0;
+	    hooks->s.mpi_initialized = 1;
+	    hooks->s.abort_when_mpi_abort = 0;
+	}
 
 	(*kmr_ld_err)(MSG, "Setup MPI hooks done.\n");
 
@@ -186,23 +209,42 @@ kmr_spawn_hookup(struct kmr_spawn_hooks *hooks)
     }
 }
 
-/* Sets the world communicator.  It stores the structure of
-   communicator with a given one. */
+/* Looks up symbol references of communicators. */
 
 static int
-kmr_spawn_set_world(struct kmr_spawn_hooks *hooks, MPI_Comm comm)
+kmr_spawn_lookup_constants(struct kmr_spawn_hooks *hooks)
 {
     assert(hooks != 0);
-    size_t sz = hooks->h.data_size_of_comm;
-    memcpy(hooks->h.mpi_world, comm, sz);
+    hooks->h.mpi_comm_world = dlsym(RTLD_DEFAULT, "ompi_mpi_comm_world");
+    hooks->h.mpi_byte = dlsym(RTLD_DEFAULT, "ompi_mpi_byte");
+    hooks->h.mpi_comm_null = dlsym(RTLD_DEFAULT, "ompi_mpi_comm_null");
+    if (hooks->h.mpi_comm_world == 0) {
+	(*kmr_ld_err)(DIE, ("Strange: No symbol ompi_mpi_comm_world.\n"));
+	abort();
+    }
+    return MPI_SUCCESS;
+}
+
+/* Sets the world communicator.  It stores the structure of the world
+   communicator with a given one.  It looks up the variable of the
+   world communicator using dlsym(), if LOOKUP is true. */
+
+static int
+kmr_spawn_set_world(struct kmr_spawn_hooks *hooks, void *comm)
+{
+    assert(hooks != 0);
+    if (comm != 0) {
+	size_t sz = hooks->h.size_of_comm_data;
+	memcpy(hooks->h.mpi_comm_world, comm, sz);
+    }
     return MPI_SUCCESS;
 }
 
 int
 kmr_spawn_mpi_comm_size(MPI_Comm comm, int *size)
 {
-    struct kmr_spawn_hooks *hooks = kmr_spawn_hooks;
     assert(kmr_spawn_hooks != 0);
+    struct kmr_spawn_hooks *hooks = kmr_spawn_hooks;
     int cc;
     cc = (*hooks->h.PMPI_Comm_size)(comm, size);
     return cc;
@@ -211,8 +253,8 @@ kmr_spawn_mpi_comm_size(MPI_Comm comm, int *size)
 int
 kmr_spawn_mpi_comm_rank(MPI_Comm comm, int *rank)
 {
-    struct kmr_spawn_hooks *hooks = kmr_spawn_hooks;
     assert(kmr_spawn_hooks != 0);
+    struct kmr_spawn_hooks *hooks = kmr_spawn_hooks;
     int cc;
     cc = (*hooks->h.PMPI_Comm_rank)(comm, rank);
     return cc;
@@ -221,8 +263,8 @@ kmr_spawn_mpi_comm_rank(MPI_Comm comm, int *rank)
 int
 kmr_spawn_mpi_comm_remote_size(MPI_Comm comm, int *size)
 {
-    struct kmr_spawn_hooks *hooks = kmr_spawn_hooks;
     assert(kmr_spawn_hooks != 0);
+    struct kmr_spawn_hooks *hooks = kmr_spawn_hooks;
     int cc;
     cc = (*hooks->h.PMPI_Comm_remote_size)(comm, size);
     return cc;
@@ -231,8 +273,8 @@ kmr_spawn_mpi_comm_remote_size(MPI_Comm comm, int *size)
 int
 kmr_spawn_mpi_comm_get_name(MPI_Comm comm, char *name, int *len)
 {
-    struct kmr_spawn_hooks *hooks = kmr_spawn_hooks;
     assert(kmr_spawn_hooks != 0);
+    struct kmr_spawn_hooks *hooks = kmr_spawn_hooks;
     int cc;
     cc = (*hooks->h.PMPI_Comm_get_name)(comm, name, len);
     return cc;
@@ -241,8 +283,8 @@ kmr_spawn_mpi_comm_get_name(MPI_Comm comm, char *name, int *len)
 int
 kmr_spawn_mpi_comm_set_name(MPI_Comm comm, char *name)
 {
-    struct kmr_spawn_hooks *hooks = kmr_spawn_hooks;
     assert(kmr_spawn_hooks != 0);
+    struct kmr_spawn_hooks *hooks = kmr_spawn_hooks;
     int cc;
     cc = (*hooks->h.PMPI_Comm_set_name)(comm, name);
     return cc;
@@ -253,8 +295,8 @@ kmr_spawn_mpi_intercomm_create(MPI_Comm lcomm, int lleader,
 			       MPI_Comm pcomm, int pleader,
 			       int tag, MPI_Comm *icomm)
 {
-    struct kmr_spawn_hooks *hooks = kmr_spawn_hooks;
     assert(kmr_spawn_hooks != 0);
+    struct kmr_spawn_hooks *hooks = kmr_spawn_hooks;
     int cc;
     cc = (*hooks->h.PMPI_Intercomm_create)(lcomm, lleader, pcomm, pleader,
 					   tag, icomm);
@@ -264,8 +306,8 @@ kmr_spawn_mpi_intercomm_create(MPI_Comm lcomm, int lleader,
 int
 kmr_spawn_mpi_comm_dup(MPI_Comm comm, MPI_Comm *newcomm)
 {
-    struct kmr_spawn_hooks *hooks = kmr_spawn_hooks;
     assert(kmr_spawn_hooks != 0);
+    struct kmr_spawn_hooks *hooks = kmr_spawn_hooks;
     int cc;
     cc = (*hooks->h.PMPI_Comm_dup)(comm, newcomm);
     return cc;
@@ -274,40 +316,44 @@ kmr_spawn_mpi_comm_dup(MPI_Comm comm, MPI_Comm *newcomm)
 int
 kmr_spawn_mpi_comm_free(MPI_Comm *comm)
 {
-    struct kmr_spawn_hooks *hooks = kmr_spawn_hooks;
     assert(kmr_spawn_hooks != 0);
+    struct kmr_spawn_hooks *hooks = kmr_spawn_hooks;
     int cc;
     cc = (*hooks->h.PMPI_Comm_free)(comm);
     return cc;
 }
 
 int
-kmr_spawn_mpi_send(void *buf, int count, MPI_Datatype dty,
+kmr_spawn_mpi_send(void *buf, int cnt, MPI_Datatype dty,
 		   int dst, int tag, MPI_Comm comm)
 {
-    struct kmr_spawn_hooks *hooks = kmr_spawn_hooks;
     assert(kmr_spawn_hooks != 0);
+    struct kmr_spawn_hooks *hooks = kmr_spawn_hooks;
     int cc;
-    cc = (*hooks->h.PMPI_Send)(buf, count, dty, dst, tag, comm);
+    //fprintf(stderr, "AHO> [%05d] send cnt=%d dty=%lx tag=%d.\n",
+    //hooks->s.base_rank, cnt, dty, tag); fflush(0);
+    cc = (*hooks->h.PMPI_Send)(buf, cnt, dty, dst, tag, comm);
+    //fprintf(stderr, "AHO< [%05d] send cnt=%d dty=%lx tag=%d.\n",
+    //hooks->s.base_rank, cnt, dty, tag); fflush(0);
     return cc;
 }
 
 int
-kmr_spawn_mpi_recv(void *buf, int count, MPI_Datatype dty,
+kmr_spawn_mpi_recv(void *buf, int cnt, MPI_Datatype dty,
 		   int src, int tag, MPI_Comm comm, MPI_Status *status)
 {
-    struct kmr_spawn_hooks *hooks = kmr_spawn_hooks;
     assert(kmr_spawn_hooks != 0);
+    struct kmr_spawn_hooks *hooks = kmr_spawn_hooks;
     int cc;
-    cc = (*hooks->h.PMPI_Recv)(buf, count, dty, src, tag, comm, status);
+    cc = (*hooks->h.PMPI_Recv)(buf, cnt, dty, src, tag, comm, status);
     return cc;
 }
 
 int
 kmr_spawn_mpi_get_count(MPI_Status *status, MPI_Datatype dty, int *count)
 {
-    struct kmr_spawn_hooks *hooks = kmr_spawn_hooks;
     assert(kmr_spawn_hooks != 0);
+    struct kmr_spawn_hooks *hooks = kmr_spawn_hooks;
     int cc;
     cc = (*hooks->h.PMPI_Get_count)(status, dty, count);
     return cc;
@@ -316,17 +362,17 @@ kmr_spawn_mpi_get_count(MPI_Status *status, MPI_Datatype dty, int *count)
 void
 kmr_spawn_true_exit(int status)
 {
-    struct kmr_spawn_hooks *hooks = kmr_spawn_hooks;
     assert(kmr_spawn_hooks != 0);
-    (*hooks->h.exit)(status);
+    struct kmr_spawn_hooks *hooks = kmr_spawn_hooks;
+    (*hooks->h.raw_exit)(status);
 }
 
 int
 kmr_spawn_true_execve(const char *file, char *const argv[],
 		      char *const envp[])
 {
-    struct kmr_spawn_hooks *hooks = kmr_spawn_hooks;
     assert(kmr_spawn_hooks != 0);
+    struct kmr_spawn_hooks *hooks = kmr_spawn_hooks;
     int cc = (*hooks->h.execve)(file, argv, envp);
     return cc;
 }
@@ -334,9 +380,10 @@ kmr_spawn_true_execve(const char *file, char *const argv[],
 int
 kmr_spawn_true_mpi_finalize(void)
 {
-    struct kmr_spawn_hooks *hooks = kmr_spawn_hooks;
     assert(kmr_spawn_hooks != 0);
-    kmr_spawn_set_world(hooks, (MPI_Comm)hooks->h.old_world);
+    struct kmr_spawn_hooks *hooks = kmr_spawn_hooks;
+    kmr_spawn_lookup_constants(hooks);
+    kmr_spawn_set_world(hooks, hooks->h.saved_genuine_world);
     int cc = (*hooks->h.PMPI_Finalize)();
     return cc;
 }
@@ -344,8 +391,10 @@ kmr_spawn_true_mpi_finalize(void)
 int
 kmr_spawn_true_mpi_abort(MPI_Comm comm, int errorcode)
 {
-    struct kmr_spawn_hooks *hooks = kmr_spawn_hooks;
     assert(kmr_spawn_hooks != 0);
+    struct kmr_spawn_hooks *hooks = kmr_spawn_hooks;
+    kmr_spawn_lookup_constants(hooks);
+    kmr_spawn_set_world(hooks, hooks->h.saved_genuine_world);
     int cc = (*hooks->h.PMPI_Abort)(comm, errorcode);
     return cc;
 }
@@ -355,10 +404,12 @@ kmr_spawn_true_mpi_abort(MPI_Comm comm, int errorcode)
 void
 exit(int status)
 {
-    (*kmr_ld_err)(MSG, "Skip exit (3c) (status=0x%x).\n", status);
+    (*kmr_ld_err)(DIN, "Skip exit (3c) (status=0x%x).\n", status);
     struct kmr_spawn_hooks *hooks = kmr_spawn_hooks;
     if (hooks != 0) {
 	hooks->s.mpi_initialized = 0;
+	kmr_spawn_lookup_constants(hooks);
+	kmr_spawn_set_world(hooks, hooks->h.saved_genuine_world);
 	kmr_spawn_service(hooks, status);
 	/*NEVERHERE*/
 	abort();
@@ -374,7 +425,7 @@ int
 execve(const char *file, char * const *argv, char * const *envp)
 {
     /*(__attribute__((noreturn)))*/
-    (*kmr_ld_err)(DIE, "CANNOT CALL EXECVE (2).\n");
+    (*kmr_ld_err)(DIE, "CANNOT CALL execve (2).\n");
     abort();
 }
 
@@ -384,14 +435,15 @@ int
 MPI_Init(int *argc, char ***argv)
 {
     (*kmr_ld_err)(DIN, "Hooked MPI_Init() called.\n");
-    struct kmr_spawn_hooks *hooks = kmr_spawn_hooks;
     assert(kmr_spawn_hooks != 0);
+    struct kmr_spawn_hooks *hooks = kmr_spawn_hooks;
     if (hooks->s.mpi_initialized) {
 	(*kmr_ld_err)(DIE, ("Hooked MPI_Init() is called"
 			    " but MPI is already initialized.\n"));
 	abort();
     }
     hooks->s.mpi_initialized = 1;
+    kmr_spawn_lookup_constants(hooks);
     kmr_spawn_set_world(hooks, hooks->s.spawn_world);
     return MPI_SUCCESS;
 }
@@ -402,14 +454,15 @@ int
 MPI_Init_thread(int *argc, char ***argv, int required, int *provided)
 {
     (*kmr_ld_err)(DIN, "Hooked MPI_Init_thread() called.\n");
-    struct kmr_spawn_hooks *hooks = kmr_spawn_hooks;
     assert(kmr_spawn_hooks != 0);
+    struct kmr_spawn_hooks *hooks = kmr_spawn_hooks;
     if (hooks->s.mpi_initialized) {
 	(*kmr_ld_err)(DIE, ("Hooked MPI_Init_thread() is called"
 			    " but MPI is already initialized.\n"));
 	abort();
     }
     hooks->s.mpi_initialized = 1;
+    kmr_spawn_lookup_constants(hooks);
     kmr_spawn_set_world(hooks, hooks->s.spawn_world);
     int	cc = (*hooks->h.PMPI_Query_thread)(provided);
     return cc;
@@ -421,15 +474,18 @@ int
 MPI_Finalize(void)
 {
     (*kmr_ld_err)(DIN, "Hooked MPI_Finalize() called.\n");
-    struct kmr_spawn_hooks *hooks = kmr_spawn_hooks;
     assert(kmr_spawn_hooks != 0);
-    int cc;
+    struct kmr_spawn_hooks *hooks = kmr_spawn_hooks;
     if (!hooks->s.mpi_initialized) {
 	(*kmr_ld_err)(DIE, ("Hooked MPI_Finalize() is called"
 			    " but MPI is not initialized.\n"));
 	abort();
     }
     hooks->s.mpi_initialized = 0;
+    kmr_spawn_set_world(hooks, hooks->h.saved_genuine_world);
+
+#if 0
+    int cc;
     if (hooks->s.spawn_world != hooks->h.mpi_comm_null) {
 	cc = kmr_spawn_mpi_comm_free(&hooks->s.spawn_world);
 	assert(cc == MPI_SUCCESS);
@@ -438,6 +494,7 @@ MPI_Finalize(void)
 	cc = kmr_spawn_mpi_comm_free(&hooks->s.spawn_parent);
 	assert(cc == MPI_SUCCESS);
     }
+#endif
     return MPI_SUCCESS;
 }
 
@@ -447,9 +504,8 @@ int
 MPI_Abort(MPI_Comm comm, int code)
 {
     (*kmr_ld_err)(DIN, "Hooked MPI_Abort() called.\n");
-    struct kmr_spawn_hooks *hooks = kmr_spawn_hooks;
     assert(kmr_spawn_hooks != 0);
-    int cc;
+    struct kmr_spawn_hooks *hooks = kmr_spawn_hooks;
     if (hooks->s.abort_when_mpi_abort) {
 	kmr_spawn_true_mpi_abort(comm, code);
     } else {
@@ -457,6 +513,10 @@ MPI_Abort(MPI_Comm comm, int code)
 	abort();
     }
     hooks->s.mpi_initialized = 0;
+    kmr_spawn_set_world(hooks, hooks->h.saved_genuine_world);
+
+#if 0
+    int cc;
     if (hooks->s.spawn_world != hooks->h.mpi_comm_null) {
 	cc = kmr_spawn_mpi_comm_free(&hooks->s.spawn_world);
 	assert(cc == MPI_SUCCESS);
@@ -465,6 +525,7 @@ MPI_Abort(MPI_Comm comm, int code)
 	cc = kmr_spawn_mpi_comm_free(&hooks->s.spawn_parent);
 	assert(cc == MPI_SUCCESS);
     }
+#endif
     return MPI_SUCCESS;
 }
 
@@ -474,8 +535,8 @@ int
 MPI_Comm_get_parent(MPI_Comm *parent)
 {
     (*kmr_ld_err)(DIN, "Hooked MPI_Comm_get_parent() called.\n");
-    struct kmr_spawn_hooks *hooks = kmr_spawn_hooks;
     assert(kmr_spawn_hooks != 0);
+    struct kmr_spawn_hooks *hooks = kmr_spawn_hooks;
     *parent = hooks->s.spawn_parent;
     return MPI_SUCCESS;
 }

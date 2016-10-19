@@ -72,9 +72,11 @@ union kmr_spawn_rpc {
     struct kmr_spawn_none m2;
 };
 
-/* State of MPI Hooks and Spawner.  MPI_WORLD is a pointer to the
-   world communicator for the whole world, OLD_WORLD is a saved copy
-   of MPI_WORLD (use of a pointer type is Open-MPI specific). */
+/* State of MPI Hooks and Spawner.  MPI_COMM_WORLD is a pointer to the
+   world communicator (as being Open-MPI); SAVED_GENUINE_WORLD is a
+   copy of the contents of the old world.  Note the world reference
+   moves at link time, because it is a variable of static allocation
+   in Open-MPI and thus it is of a copy-relocation. */
 
 struct kmr_spawn_hooks {
     /* State of Spawner. */
@@ -117,11 +119,11 @@ struct kmr_spawn_hooks {
     /* Hooks of MPI Library. */
 
     struct {
-	void *mpi_world;
-	void *old_world;
-	size_t data_size_of_comm;
+	void *saved_genuine_world;
+	size_t size_of_comm_data;
 
 	void (*exit)(int status);
+	void (*raw_exit)(int status);
 	int (*execve)(const char *file, char *const argv[],
 		      char *const envp[]);
 
@@ -134,6 +136,7 @@ struct kmr_spawn_hooks {
 
 	/* (Used in this hook). */
 
+	void *mpi_comm_world; /*ompi_mpi_comm_world*/
 	void *mpi_byte; /*ompi_mpi_byte*/
 	void *mpi_comm_null; /*ompi_mpi_comm_null*/
 
@@ -171,8 +174,24 @@ extern int kmr_spawn_setup(struct kmr_spawn_hooks *hooks,
 			   int nsubworlds,
 			   MPI_Comm subworlds[], unsigned long colors[],
 			   size_t argssize);
-extern void kmr_spawn_service(struct kmr_spawn_hooks *hooks, int status);
 extern void kmr_spawn_set_verbosity(struct kmr_spawn_hooks *hooks, int level);
+extern void kmr_spawn_service(struct kmr_spawn_hooks *hooks, int status);
+
+/* (API of Wokers for dummy). */
+
+extern int kmr_spawn_hookup_standin(struct kmr_spawn_hooks *hooks);
+extern int kmr_spawn_setup_standin(struct kmr_spawn_hooks *hooks,
+				   MPI_Comm basecomm, int masterrank,
+				   int (*execfn)(struct kmr_spawn_hooks *,
+						 int, char **),
+				   int nsubworlds,
+				   MPI_Comm subworlds[],
+				   unsigned long colors[],
+				   size_t argssize);
+extern void kmr_spawn_set_verbosity_standin(struct kmr_spawn_hooks *hooks,
+					    int level);
+extern void kmr_spawn_service_standin(struct kmr_spawn_hooks *hooks,
+				      int status);
 
 /* Calling Unhooked Routines. */
 
