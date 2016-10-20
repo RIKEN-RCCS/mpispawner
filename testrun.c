@@ -104,8 +104,8 @@ main(int argc, char **argv, char **envp)
 	abort();
     }
 
-    typedef void (*usoexecfn_t)(char **, char **, long, char *);
-    usoexecfn_t usoexec = (usoexecfn_t)dlsym(m, "kmr_ld_usoexec");
+    typedef void (*execfn_t)(char **, void (*)(void), char **, long, char *);
+    execfn_t usoexec = (execfn_t)dlsym(m, "kmr_ld_usoexec");
     if (usoexec == 0) {
 	printf("dlsym(kmr_ld_usoexec): %s\n", dlerror());
 	abort();
@@ -138,7 +138,7 @@ main(int argc, char **argv, char **envp)
     char **oldargv = argv;
     char **newargv = &argv[1];
 
-    (*usoexec)(newargv, oldargv, 0x110, hlow);
+    (*usoexec)(newargv, 0, oldargv, 0x110, hlow);
 
     /* Never returns. */
 

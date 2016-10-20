@@ -7,17 +7,24 @@
     (https://github.com/pf-aics-riken/kmr).  The shared-object that
     containing this file works as if it is a preloaded library, where
     its position in the record of libraries in ld.so is moved in
-    advance to reloading a new executable.  ASSUMPTIONS: (1) The
-    MPI_COMM_WORLD (in Open-MPI) is an address of a statically
-    allocated structure "ompi_mpi_comm_world" (in the data/bss
-    section).  This library replaces the contents of
-    "ompi_mpi_comm_world" with another communicator.  It assumes the
-    internals of the MPI library sees the content but not the pointer.
-    (2) As MPI_COMM_WORLD, there are MPI constants such as MPI_BYTE
-    and MPI_COMM_NULL that are statically allocated.  They will move
-    while dynamic linking (with a copy relocation).  It assumes the
-    internals of the MPI library does not record the pointers to them.
-    Otherwise, it confuses the MPI. */
+    advance to reloading a new executable.
+
+    ASSUMPTIONS: (1) It assumes the internals of Open-MPI does not
+    record the references (pointers) to the constant communicators and
+    the constant datatypes.  The constant communicators are WORLD,
+    NULL, and SELF; The constant datatypes are MPI_BYTE, etc.  They
+    are statically allocated structures in the data/bss section in
+    Open-MPI.  For example, MPI_COMM_WORLD is "&ompi_mpi_comm_world".
+    They have a copy-relocation and will move while relinking that is
+    performed in this library.  Taking their addresses will confuse
+    the execution.  (2) It naturally assumes the users do not use
+    MPI_Comm_spawn().  Contrary to the assumption, Open-MPI stores the
+    reference to the null-communicator as a parent communicator.
+    Thus, the parent communicator has a bad reference after relinking.
+    This library forcibly nullifies the parent communicator.  (3) It
+    assumes the internals of Open-MPI uses the content of the
+    structure of the communicators.  This library replaces the
+    contents of "ompi_mpi_comm_world" with another communicator. */
 
 #include <mpi.h>
 #include <stdio.h>
@@ -209,7 +216,11 @@ kmr_spawn_hookup(struct kmr_spawn_hooks *hooks)
     }
 }
 
-/* Looks up symbol references of communicators. */
+/* Looks up symbol references of communicators.  It needs to look up
+   multiple times, because the references to globals will change in
+   relinking.  It forcibly nullifies the parent communicator, because
+   it stores a refenence to the null communicator which moves in
+   relinking. */
 
 static int
 kmr_spawn_lookup_constants(struct kmr_spawn_hooks *hooks)
@@ -222,6 +233,14 @@ kmr_spawn_lookup_constants(struct kmr_spawn_hooks *hooks)
 	(*kmr_ld_err)(DIE, ("Strange: No symbol ompi_mpi_comm_world.\n"));
 	abort();
     }
+
+    void **cp = dlsym(RTLD_DEFAULT, "ompi_mpi_comm_parent");
+    if (cp == 0) {
+	(*kmr_ld_err)(WRN, ("Strange: No symbol ompi_mpi_comm_parent.\n"));
+    } else {
+	*cp = hooks->h.mpi_comm_null;
+    }
+
     return MPI_SUCCESS;
 }
 

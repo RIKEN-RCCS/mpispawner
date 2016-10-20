@@ -62,7 +62,8 @@ main(int argc, char **argv)
     printf("PING1 rank=%d OK\n", rank, nprocs); fflush(0);
     MPI_Finalize();
 
-    /* Use _exit() because exit() is hooked. */
+    /* Use _exit(), because exit() is hooked to call the spawner
+       service routine which is not usable in the ping test. */
 
     _exit(0);
     return 0;

@@ -344,9 +344,7 @@ KMR_LIBAPI(kmr_spawn_service) (struct kmr_spawn_hooks *hooks, int status)
 	hooks->s.rpc_size = 0;
     }
 
-    if (0) {
-	kmr_spawn_true_mpi_finalize();
-    }
+    kmr_spawn_true_mpi_finalize();
     kmr_spawn_true_exit(0);
     abort();
 }
@@ -444,8 +442,7 @@ kmr_spawn_exec_command(struct kmr_spawn_hooks *hooks, int argc, char **argv)
 #if KMR_MAIN_LIBRARY
     return MPI_SUCCESS;
 #else
-    kmr_ld_usoexec(argv, hooks->d.initial_argv,
-		   hooks->d.options_flags,
+    kmr_ld_usoexec(argv, 0, hooks->d.initial_argv, hooks->d.options_flags,
 		   hooks->d.options_heap_bottom);
     return MPI_SUCCESS;
 #endif

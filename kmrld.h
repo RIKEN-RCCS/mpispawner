@@ -15,8 +15,8 @@ enum {
     DIN = 3,
 };
 
-extern void kmr_ld_usoexec(char **argv, char **oldargv, long flags,
-			   char *heapbottom);
+extern void kmr_ld_usoexec(char **argv, void (*lastfixing)(void),
+			   char **oldargv, long flags, char *heapbottom);
 extern long kmr_ld_get_symbol_size(char *symbol);
 extern void kmr_ld_set_error_printer(int level,
 				     void (*printfn)(int, char *, ...));

@@ -3107,21 +3107,22 @@ kmr_ld_get_symbol_size(char *name)
 
 /* Restart a new a.out with an ARGV vector.  It is like execve() but
    "path" is argv[0] and "envp" is implicit.  The arguments except for
-   ARGV are only effective at the first call.  They are ignored and
-   may be zeros for later calls.  OLDARGV is an original argv pointer
-   which is used to replace the command name strings visible in core
-   dumps.  FLAGS are combination of bits.  The 0x10 bit indicates to
-   copy the data segment by memcpy() instead of mmap().  The 0x100 bit
-   indicates to make this library as preloaded.  HEAPBOTTOM specifies
-   the lower bound of heaps.  It does NOT clean process status, which
-   normally done jointly by execve() and exit(); The caller is
-   responsible for closing file descriptors, releasing mapped memory,
-   shared-memory and semaphores, etc., and restoring the various
-   control status of a process.  It cannot reclaim malloced memory,
-   and it may be considered to use Boehm GC. */
+   ARGV and LASTFIXING are only effective at the first call.  They are
+   ignored and may be zeros for later calls.  OLDARGV is an original
+   argv pointer which is used to replace the command name strings
+   visible in core dumps.  FLAGS are combination of bits.  The 0x10
+   bit indicates to copy the data segment by memcpy() instead of
+   mmap().  The 0x100 bit indicates to make this library as preloaded.
+   HEAPBOTTOM specifies the lower bound of heaps.  It does NOT clean
+   process status, which normally done jointly by execve() and exit();
+   The caller is responsible for closing file descriptors, releasing
+   mapped memory, shared-memory and semaphores, etc., and restoring
+   the various control status of a process.  It cannot reclaim
+   malloced memory, and it may be considered to use Boehm GC. */
 
 void
-kmr_ld_usoexec(char **argv, char **oldargv, long flags, char *heapbottom)
+kmr_ld_usoexec(char **argv, void (*lastfixing)(void), 
+	       char **oldargv, long flags, char *heapbottom)
 {
     int cc;
 
@@ -3496,14 +3497,10 @@ kmr_ld_usoexec(char **argv, char **oldargv, long flags, char *heapbottom)
 	    (*kmr_ld_err)(WRN, "pthread_sigmask(): %s", strerror(cc));
 	}
 
-	/* Run a call-back for some fixing (disabled). */
+	/* Run a call-back for some fixing. */
 
-	if (0) {
-	    void (*fn)(void) = (void (*)(void))dlsym(RTLD_DEFAULT,
-						     "kmr_ld_fixup");
-	    if (fn != 0) {
-		(*fn)();
-	    }
+	if (lastfixing != 0) {
+	    (*lastfixing)();
 	}
     }
 
